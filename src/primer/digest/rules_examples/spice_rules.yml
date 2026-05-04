@@ -1,0 +1,130 @@
+# SPICE Kernels Directory Processing Rules
+# Aligned with FileType enum: CRITICAL_DOCS, REFERENCE_DOCS, SOURCE_CODE, TEXT_DATA, BINARY_FILES, UNKNOWN
+
+file_classifications:
+  # 1. CRITICAL_DOCS - 关键文档（最高优先级）
+  - name: "critical_docs"
+    patterns: ["*README*", "*readme*", "LICENSE*", "COPYING*", "NOTICE*", "CHANGELOG*", "AUTHORS*", "NEWS*", "VERSION*"]
+    strategy: "full_content"
+    priority: 100
+    max_size_kb: 128
+    comment: "Critical documentation files (README, LICENSE, etc.) -> Full content"
+
+  # 2. BINARY_FILES - SPICE二进制内核文件
+  - name: "binary_files"
+    patterns: ["*.bsp", "*.bpc", "*.bc", "*.bds", "*.bes", "*.bm"]
+    strategy: "metadata_only"
+    priority: 95
+    force_binary: true
+    comment: "SPICE binary kernels (ephemeris, constants, orientation, shape) -> Metadata only"
+
+  # 3. REFERENCE_DOCS - SPICE注释文件（包含重要元数据）
+  - name: "reference_docs"
+    patterns: ["*comments*", "*.cmt", "*.comment", "*.notes", "*.doc", "*.md"]
+    strategy: "summary_only"
+    priority: 90
+    max_size_kb: 256
+    comment: "Comment files with kernel metadata -> Summary extraction"
+
+  # 4. TEXT_DATA - SPICE文本内核文件（头部信息重要）
+  - name: "text_data_kernels"
+    patterns: ["*.tpc", "*.tsc", "*.tls", "*.tf", "*.ti", "*.to", "*.tbc", "*.tds", "*.tfc", "*.tbs", "*.tm"]
+    strategy: "header_with_stats"
+    priority: 85
+    max_size_kb: 1024
+    comment: "SPICE text kernels (PCK, SCLK, LSK, FK, IK, etc.) -> Header with statistics"
+
+  # 5. TEXT_DATA - 配置文件（结构提取）
+  - name: "text_data_configs"
+    patterns: ["*.ker", "*.conf", "*.cfg", "*.ini", "*.yml", "*.yaml", "*.json", "*.txt"]
+    strategy: "structure_extract"
+    priority: 80
+    max_size_kb: 512
+    comment: "Configuration and index files -> Structure extract"
+
+  # 6. TEXT_DATA - 数据文件（CSV等表格数据）
+  - name: "text_data_tables"
+    patterns: ["*.csv", "*.tab", "*.tsv"]
+    strategy: "header_with_stats"
+    priority: 75
+    max_size_kb: 2048
+    comment: "Table data files -> Header with stats (first N rows)"
+
+  # 7. BINARY_FILES - 数据文件（FITS, HDF5等科学数据）
+  - name: "binary_data"
+    patterns: ["*.dat", "*.fits", "*.h5", "*.hdf5", "*.db", "*.sqlite"]
+    strategy: "metadata_only"
+    priority: 70
+    force_binary: true
+    comment: "Scientific data files -> Metadata only"
+
+  # 8. UNKNOWN - 其他未识别扩展名（保守处理）
+  - name: "unknown"
+    patterns: ["*.x*", "*.v*", "*.a*", "*.p*", "*.s*", "*.o*", "*."]
+    strategy: "metadata_only"
+    priority: 50
+    force_binary: true
+    comment: "Unknown file extensions -> Metadata only (safe fallback)"
+
+# 忽略模式（不处理的文件）
+ignore_patterns:
+  - ".rules.yml"
+  - "*.zip"
+  - "*.tar.gz"
+  - "*.tar.bz2"
+  - "*.tgz"
+  - "backup_*"
+  - "old_*"
+  - "temp_*"
+  - ".git*"
+  - "__pycache__"
+  - "*.pyc"
+  - "*.pyo"
+  - "*.min.js"
+  - "*.map"
+
+# 全局配置
+config:
+  max_file_size_mb: 10240  # 10GB，超过此大小的文件将完全跳过
+  context_size_tokens: 128000  # 目标LLM上下文大小
+  token_utilization_warning: 0.8  # 令牌利用率超过此阈值时发出警告
+  parallel_processing: true  # 启用并行处理（如果文件数 > 100）
+
+# 处理建议
+recommendations:
+  - "Binary kernel files (.bsp, .bpc) are large and processed as BINARY_FILES (metadata only)"
+  - "Text kernel files (.tpc, .tls) processed as TEXT_DATA with HEADER_WITH_STATS strategy"
+  - "Comment files (.cmt) processed as REFERENCE_DOCS with SUMMARY_ONLY strategy"
+  - "Critical documentation processed as CRITICAL_DOCS with FULL_CONTENT strategy"
+  - "Use --max-size parameter to limit processing of oversized kernels"
+
+# 扩展名参考（映射到 FileType 分类）
+extension_reference:
+  critical_docs:
+    - "README*": "Project documentation"
+    - "LICENSE*": "Licensing information"
+    - "CHANGELOG*": "Version history"
+  
+  binary_files:
+    - ".bsp": "Binary SPK (ephemeris) kernel"
+    - ".bpc": "Binary PCK (planet constants) kernel"
+    - ".bc": "Binary CK (orientation) kernel"
+    - ".bds": "Binary DSK (shape) kernel"
+  
+  reference_docs:
+    - ".cmt": "Comment file with kernel metadata"
+    - ".comment": "Extended comment file"
+    - ".notes": "Release notes"
+  
+  text_data:
+    - ".tpc": "Text PCK kernel"
+    - ".tsc": "Text SCLK kernel"
+    - ".tls": "Text LSK (leap seconds) kernel"
+    - ".tf": "Text FK (frame) kernel"
+    - ".ti": "Text IK (instrument) kernel"
+    - ".tm": "Text MK (meta) kernel"
+  
+  text_data_configs:
+    - ".ker": "Kernel database index file"
+    - ".yaml": "YAML configuration"
+    - ".json": "JSON configuration"
