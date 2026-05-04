@@ -845,7 +845,7 @@ def main():
     """Command line entry point"""
     
     # 获取程序名用于帮助信息格式化
-    prog_name = os.path.basename(sys.argv[0])
+    prog_name = 'python -m primer.digest'
     
     # 检测终端颜色支持（跨平台）
     def _supports_color():
@@ -911,6 +911,7 @@ Operation Modes:
   {prog_name} /data --max-size 100 --parallel --workers 8"""
     
     parser = argparse.ArgumentParser(
+        prog=prog_name,
         description=description,
         formatter_class=FormatterClass,
         epilog=epilog,
