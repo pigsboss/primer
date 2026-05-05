@@ -1,0 +1,106 @@
+@startuml digest_activities
+!theme plain
+title Hey! Directory Digest - Main Activity Flow (v1.0)
+
+start
+:User runs "python -m primer.digest <dir> [options]";
+:CLI parses arguments & configuration;
+
+:Initialize DirectoryDigest instance;
+note right
+  - root directory
+  - context size
+  - rules file
+  - ignore patterns
+  - parallel options
+end note
+
+:create_digest(mode) called;
+
+partition "Phase 1: Collection & Initial Classification" {
+  :Build directory structure (tree);
+  :Collect all files into flat list;
+
+  while (For each file) is (more files)
+    :Classify file using RuleEngine;
+    note right
+      Returns FileClassification:
+      - file_type
+      - strategy
+      - estimated_tokens
+      - force_binary
+    end note
+
+    :Determine initial strategy;
+    if (mode == "sort"?) then (yes)
+      :Force METADATA_ONLY;
+    else (no)
+      if (mode == "full"?) then (yes)
+        :Keep classification strategy;
+      else (framework)
+        :Apply InitialEmbeddingStrategy
+        based on OutputMode and FileType;
+      endif
+    endif
+
+    :Store (file_digest, initial_strategy);
+  endwhile (no more files)
+}
+
+partition "Phase 2: Token Budget Adjustment" {
+  if (mode == "full"?) then (yes)
+    :Skip adjustment (full content requested);
+  else if (ContextManager exists?) then (yes)
+    :Calculate total estimated tokens;
+    if (Total > available?) then (yes)
+      :Sort files by priority (lowest first);
+      repeat
+        :Downgrade strategy of lowest priority file;
+        :Recalculate total tokens;
+      repeat while (Total still > available and more files to downgrade)
+    else (no)
+      :Strategies unchanged;
+    endif
+  else (no)
+    :No adjustment;
+  endif
+}
+
+partition "Phase 3: Process Files with Final Strategy" {
+  while (For each file) is (more files)
+    if (Strategy == METADATA_ONLY?) then (yes)
+      :Skip content processing;
+    else (no)
+      :ProcessorRegistry.process_file()
+      with the assigned strategy;
+      note right
+        Dispatches to:
+        HumanReadableSummarizer,
+        SourceCodeAnalyzer,
+        SmartTextProcessor, etc.
+      end note
+    endif
+    :Record actual strategy used;
+  endwhile (no more files)
+}
+
+partition "Output Generation" {
+  if (mode == "sort"?) then (yes)
+    :Generate sort report with file classifications;
+  else (no)
+    :Generate full output (structure + summaries);
+  endif
+
+  :FormatConverter converts result to desired format
+  (json/yaml/md/html/toml/txt);
+}
+
+if (Output destination?) then (stdout)
+  :Print to stdout;
+else (file)
+  :Save to specified file;
+endif
+
+stop
+
+@enduml
