@@ -1,0 +1,41 @@
+@startuml digest_components
+!include <C4/C4_Component>
+!include <C4/C4_Context>
+
+title Directory Digest - Component Diagram (v1.0)
+
+Person(user, "User", "CLI / API consumer")
+
+System_Boundary(digest_system, "Directory Digest") {
+    Container(cli, "CLI Entry", "Python module", "argparse, __main__.py", "Parses args, triggers digest creation")
+    Container(digest, "DirectoryDigest", "Python class", "Orchestrates file collection, classification, processing and output")
+    
+    Container(rule_engine, "RuleEngine", "Python class", "Classifies files (extension, content, rules.yaml), assigns initial processing strategy")
+    Container(context_mgr, "ContextManager", "Python class", "Manages LLM context token budget, controls content depth")
+    Container(processor_reg, "ProcessorRegistry", "Python class", "Dispatches files to registered analyzers based on type & strategy")
+    
+    Container(analyzers, "Analyzers", "Library", "Collection of file analyzers")
+    Container(format_converter, "FormatConverter", "Python class", "Converts internal dict to JSON, YAML, Markdown, HTML, etc.")
+}
+
+Rel(user, cli, "Runs 'python -m primer.digest ...'")
+Rel(cli, digest, "Creates & calls create_digest(mode)")
+Rel(digest, rule_engine, "Uses for file classification & token estimation")
+Rel(digest, context_mgr, "Uses for token budget check & allocation")
+Rel(digest, processor_reg, "Uses to process files with determined strategy")
+Rel(processor_reg, analyzers, "Calls appropriate analyzer per file type/strategy")
+
+note left of analyzers
+  • EncodingAnalyzer
+  • MetadataAnalyzer
+  • SemanticAnalyzers
+    - HumanReadableSummarizer
+    - SourceCodeAnalyzer
+    - SmartTextProcessor
+    - SmartDataFileAnalyzer
+end note
+
+Rel(digest, format_converter, "Converts result before output")
+Rel(format_converter, cli, "Outputs formatted result")
+
+@enduml
