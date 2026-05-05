@@ -1,0 +1,201 @@
+@startuml digest_classes
+!theme plain
+title Hey! Directory Digest - Core Class Diagram (v1.0)
+
+' Enumerations
+enum FileType {
+  CRITICAL_DOCS
+  REFERENCE_DOCS
+  SOURCE_CODE
+  TEXT_DATA
+  BINARY_FILES
+  UNKNOWN
+}
+
+enum ProcessingStrategy {
+  METADATA_ONLY
+  FULL_CONTENT
+  SUMMARY_ONLY
+  CODE_SKELETON
+  STRUCTURE_EXTRACT
+  HEADER_WITH_STATS
+}
+
+enum OutputMode {
+  FRAMEWORK
+  FULL
+  SORT
+}
+
+' Data classes
+class FileClassification {
+  file_type: FileType
+  strategy: ProcessingStrategy
+  force_binary: bool
+  estimated_tokens: int
+  rule_name: str
+}
+
+class FileMetadata {
+  path: Path
+  size: int
+  modified_time: datetime
+  file_type: FileType
+  force_binary: bool
+  processing_strategy: ProcessingStrategy
+}
+
+class FileDigest {
+  metadata: FileMetadata
+  full_content: Optional[str]
+  human_readable_summary: Optional[HumanReadableSummary]
+  actual_strategy: Optional[str]
+}
+
+class HumanReadableSummary << (D, orchid) >> {
+  title: Optional[str]
+  line_count: int
+  word_count: int
+  character_count: int
+  summary: Optional[str]
+  first_lines: List[str]
+}
+
+class SourceCodeAnalysis << (D, orchid) >> {
+  language: str
+  total_lines: int
+  code_lines: int
+  comment_lines: int
+  blank_lines: int
+  imports: List[str]
+  functions: List[Dict]
+  classes: List[Dict]
+}
+
+class DirectoryStructure {
+  name: str
+  path: Path
+  files: List[FileDigest]
+  subdirs: Dict[str, DirectoryStructure]
+}
+
+' Core orchestration
+abstract class DirectoryDigestBase {
+  - root: Path
+  - config: Dict
+  - structure: DirectoryStructure
+  - stats: Dict
+  - rule_engine: RuleEngine
+  - context_manager: ContextManager
+  + _build_directory_structure(Path): DirectoryStructure
+  + _collect_all_files_flat(): List[FileDigest]
+  + save_output(...): Path
+  + _format_size(int): str
+}
+
+class DirectoryDigest {
+  - processor_registry: FileProcessorRegistry
+  - human_summarizer: Optional[HumanReadableSummarizer]
+  - source_analyzer: Optional[SourceCodeAnalyzer]
+  - final_strategies: Dict
+  + create_digest(mode: str): Dict
+  - _classify_file(Path): FileClassification
+  - _adjust_strategies_by_token_limit(...): Dict
+  - _process_with_final_strategy(...): void
+}
+
+' Rule engine & context management
+class RuleEngine {
+  - rules: List[FileRule]
+  + classify_file(Path): Tuple[ProcessingStrategy, bool]
+  + estimate_token_usage(Path, ProcessingStrategy): int
+  + load_rules(Path): void
+}
+
+class ContextManager {
+  - max_tokens: int
+  - used_tokens: int
+  - file_records: List[Dict]
+  + can_allocate(int): bool
+  + allocate(int, Dict): bool
+  + get_summary(): Dict
+}
+
+class InitialEmbeddingStrategy {
+  {static} + get_initial_strategy(OutputMode, FileType): ProcessingStrategy
+  {static} + get_priority(FileType): int
+  {static} + get_strategy_hierarchy(FileType): List[ProcessingStrategy]
+}
+
+' Processor registry & processors
+class FileProcessorRegistry {
+  - processors: Dict
+  - rule_engine: RuleEngine
+  - context_manager: ContextManager
+  - stats: Dict
+  + get_processor(FileDigest): Optional[BaseFileProcessor]
+  + process_file(FileDigest, mode, strategy): bool
+}
+
+abstract class BaseFileProcessor {
+  {abstract} + process(FileDigest, content, mode, strategy): bool
+}
+
+' Analyzers (processors use them)
+class HumanReadableSummarizer {
+  + summarize(content: str): HumanReadableSummary
+}
+
+class SourceCodeAnalyzer {
+  + analyze(code: str, language: str): SourceCodeAnalysis
+}
+
+class SmartTextProcessor {
+  + process(content: str): Dict
+}
+
+class SmartDataFileAnalyzer {
+  + analyze(filepath: Path): Dict
+}
+
+' Format converter
+class FormatConverter {
+  {static} + convert(digest_data: Dict, format: str, mode: str): str
+  {static} - _to_markdown_basic(digest_data: Dict): str
+  {static} - _format_size(int): str
+}
+
+' Relationships
+DirectoryDigestBase <|-- DirectoryDigest
+DirectoryDigestBase *-- DirectoryStructure
+DirectoryDigestBase *-- RuleEngine
+DirectoryDigestBase *-- ContextManager
+DirectoryDigest ..> FileClassification
+DirectoryDigest ..> FileDigest
+DirectoryDigest ..> InitialEmbeddingStrategy
+DirectoryDigest *-- FileProcessorRegistry
+DirectoryDigest ..> FormatConverter
+
+FileDigest *-- FileMetadata
+FileDigest o-- HumanReadableSummary
+
+DirectoryStructure *-- "*" FileDigest
+
+RuleEngine ..> FileClassification
+FileClassification --> FileType
+FileClassification --> ProcessingStrategy
+
+FileProcessorRegistry --> BaseFileProcessor
+BaseFileProcessor <|.. HumanReadableSummarizer
+BaseFileProcessor <|.. SourceCodeAnalyzer
+BaseFileProcessor <|.. SmartTextProcessor
+BaseFileProcessor <|.. SmartDataFileAnalyzer
+
+HumanReadableSummarizer ..> HumanReadableSummary
+SourceCodeAnalyzer ..> SourceCodeAnalysis
+
+InitialEmbeddingStrategy ..> OutputMode
+InitialEmbeddingStrategy ..> FileType
+InitialEmbeddingStrategy ..> ProcessingStrategy
+
+@enduml
