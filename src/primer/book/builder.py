@@ -371,6 +371,10 @@ class BookBuilder:
         ]
         appendix_started = False
         short_marks: List[str] = []
+        # 章号起点：章号由 LaTeX 连续自动编号，这里只为量"章标题一行的容量"时
+        # 扣掉自动编号的宽度（见 tex.chapter_title_capacity）。附录章另起字母序号。
+        chapter_start = 1
+        appendix_number_start = 0
         for key in manifest.body_order:
             if key == BIBLIOGRAPHY_KEY:
                 doc.append(
@@ -384,19 +388,27 @@ class BookBuilder:
                 doc.append(r"\appendix")
                 appendix_started = True
             blocks = md.parse_blocks(volume.text.splitlines())
-            doc.append(
-                "\n".join(
-                    tex.render_blocks(
-                        blocks,
-                        manifest.typography,
-                        self.findings,
-                        part_label=volume.spec.part_label,
-                        appendix=volume.spec.appendix,
-                        location=volume.spec.id,
-                        marks=short_marks,
-                    )
-                )
+            lines = tex.render_blocks(
+                blocks,
+                manifest.typography,
+                self.findings,
+                part_label=volume.spec.part_label,
+                appendix=volume.spec.appendix,
+                location=volume.spec.id,
+                marks=short_marks,
+                chapter_start=chapter_start,
+                appendix_number_start=appendix_number_start,
             )
+            doc.append("\n".join(lines))
+            # 只数真正的 \chapter{…}／\chapter[…]{…}：\chaptermark{…} 也以这七个
+            # 字母开头，数进去会让下一篇的章号整体偏移。
+            chapters = sum(
+                1 for line in lines if line.startswith(r"\chapter{") or line.startswith(r"\chapter[")
+            )
+            if volume.spec.appendix:
+                appendix_number_start += chapters
+            else:
+                chapter_start += chapters
         if short_marks:
             self.findings.append(
                 Finding(

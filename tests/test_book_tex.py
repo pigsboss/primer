@@ -318,6 +318,82 @@ def test_a_short_heading_title_gets_no_mark():
     assert rendered == [r"\chapter{导言}", r"\section{范围}"]
 
 
+# ---------------------------------------------------------------- 章标题孤字
+
+
+def test_chapter_title_capacity_accounts_for_the_number_and_the_quad():
+    """一行容量 = 版心能放的单位 − 编号 − \\quad：三字章号 33、四字章号 31。"""
+    assert tex.chapter_title_capacity(TYPO, tex.chapter_number_text(7)) == 33
+    assert tex.chapter_title_capacity(TYPO, tex.chapter_number_text(14)) == 31
+    assert tex.chapter_title_capacity(TYPO, tex.appendix_number_text(0)) == 33
+
+
+def test_the_chapter_number_is_part_of_the_line_capacity():
+    """同一个题名：三字章号放得下、四字章号放不下——漏掉编号就会误判成孤字。"""
+    title = "驱动机制研判与总体目标设定方法论"
+
+    short = render(["## 第 9 章　" + title], chapter_start=9)
+    long = render(["## 第 14 章　" + title], chapter_start=14)
+
+    assert short[0] == rf"\chapter{{{title}}}"
+    assert long[0] == r"\chapter[驱动机制研判与总体目标设定方法论]{驱动机制研判与\\总体目标设定方法论}"
+
+
+def test_a_chapter_title_that_would_leave_one_character_gets_an_explicit_break():
+    """第 57 页那一例：自然换行把"现"字单独甩在第二行；改在停顿处显式断行。
+
+    可选参数留住完整题名（目录与页眉用），强制参数只控制版面上的显示——断点落在
+    "、"之后，不落在它之前（"、"起行是中文排版的禁忌）。
+    """
+    rendered = render(["## 第 7 章　三十年回顾：代际、成就与判定性发现"], chapter_start=7)
+
+    assert rendered[0] == (
+        r"\chapter[三十年回顾：代际、成就与判定性发现]{三十年回顾：代际、\\成就与判定性发现}"
+    )
+    # 页眉里的短标记照旧（与断行无关）
+    assert rendered[1] == r"\chaptermark{三十年回顾：代际、成…}"
+
+
+def test_a_chapter_title_that_wraps_cleanly_is_left_alone():
+    """第二行还剩五个字：一个字节都不改。"""
+    rendered = render(["## 第 11 章　历史回顾：国家规划与使命驱动的三十年检验"], chapter_start=11)
+
+    assert rendered[0] == r"\chapter{历史回顾：国家规划与使命驱动的三十年检验}"
+
+
+def test_a_chapter_title_that_fits_one_line_is_left_alone():
+    rendered = render(["## 第 1 章　导言：科学问题的坐标系"], chapter_start=1)
+
+    assert rendered == [r"\chapter{导言：科学问题的坐标系}"]
+
+
+def test_an_appendix_chapter_title_is_measured_against_its_lettered_number():
+    """附录章的编号是"附录 A"（6 个单位），不是第十五章——两条都要量得对。"""
+    title = "科产融合专题：深空探测专用技术产业链调研"
+
+    rendered = render(["@@PART@@附录 A　" + title], appendix=True)
+
+    assert rendered[0] == rf"\chapter{{{title}}}"
+
+
+def test_a_break_never_lands_inside_a_markdown_link():
+    """断点只能落在安全位置：链接是一个整体，劈开就渲染不成。"""
+    title = "甲乙[资料](https://example.org/x)丙丁戊己庚辛壬癸"
+
+    parts = tex._balanced_lines(title, 33, 2)
+
+    assert parts is not None
+    assert "".join(parts) == title
+    assert parts[0].endswith(")")
+
+
+def test_no_break_is_emitted_when_no_safe_position_fits():
+    """整段都在链接里、放不下的位置又不安全时，宁可不改也不冒险溢出。"""
+    title = "甲乙[很长很长很长很长很长很长的链接文字](https://example.org/x)丙丁"
+
+    assert tex.chapter_title_lines(title, 8) is None
+
+
 # ---------------------------------------------------------------- 文档骨架
 
 

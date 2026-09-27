@@ -6,6 +6,7 @@
 """
 
 import json
+import os
 import shutil
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +15,7 @@ import pytest
 
 from book_fixtures import MANIFEST, tiny_book
 
+from primer.book import checks
 from primer.book.__main__ import main
 from primer.book.inspect import (
     DEFAULT_MAX_TOKENS,
@@ -48,9 +50,14 @@ TOC = """\
 """
 
 
-def mini_pdf(pages=2, rotate=None, same_content=False):
-    """手写一个最小 PDF：够 poppler 打开、分页，并可指定某页旋转 90 度。"""
+def mini_pdf(pages=2, rotate=None, same_content=False, blank=()):
+    """手写一个最小 PDF：够 poppler 打开、分页，并可指定某页旋转 90 度。
+
+    ``blank`` 里的页码排一个空白内容流——用来造"页面上一个词都没有"的页，交叉核对
+    的"正文为空"判据要有这种页才能测。
+    """
     rotate = rotate or {}
+    blank = set(blank)
     objects = [
         b"<</Type/Catalog/Pages 2 0 R>>",
         b"<</Type/Pages/Kids[" + b" ".join(b"%d 0 R" % (4 + i) for i in range(pages))
@@ -66,7 +73,7 @@ def mini_pdf(pages=2, rotate=None, same_content=False):
         )
     for index in range(pages):
         number = 1 if same_content else index + 1
-        stream = b"BT /F1 20 Tf 20 250 Td (page %d) Tj ET" % number
+        stream = b" " if (index + 1) in blank else b"BT /F1 20 Tf 20 250 Td (page %d) Tj ET" % number
         objects.append(b"<</Length %d>>\nstream\n" % len(stream) + stream + b"\nendstream")
 
     out = bytearray(b"%PDF-1.4\n")
@@ -108,12 +115,15 @@ def prepare(
     findings=None,
     same_content=False,
     manifest_text=MANIFEST,
+    blank=(),
 ):
     """微型书 + 一份"已编译"的 PDF（可带 .toc 与发现清单），返回清单路径。"""
     path = tiny_book(tmp_path, manifest_text)
     out = tmp_path / "_primer" / "book"
     out.mkdir(parents=True, exist_ok=True)
-    (out / "tiny.pdf").write_bytes(mini_pdf(pages, rotate, same_content=same_content))
+    (out / "tiny.pdf").write_bytes(
+        mini_pdf(pages, rotate, same_content=same_content, blank=blank)
+    )
     if toc:
         (out / "tiny.toc").write_text(toc, encoding="utf-8")
     if findings is not None:
@@ -895,9 +905,14 @@ def test_rubric_asks_only_for_what_a_rendered_page_can_show():
     for dropped in ("overflow", "text-block", "margin", "numbering", "glyph", "tofu", "garbled"):
         assert dropped not in lowered
 
+    # 中文可在任意两字之间换行，"一个两字词跨两行"是正常排版，评分规则里不该再有它。
+    assert "words broken mid-word" not in lowered
+
     for kept in (
         "below legibility",
+        "cells colliding",
         "single-character orphan",
+        "header drifting away from its rows",
         "too small to read",
         "cropped at the frame",
         "orphaned at the foot of a page",
@@ -1089,3 +1104,267 @@ def test_a_normal_reply_is_judged_and_the_coverage_reaches_both_reports(tmp_path
     assert [item["code"] for item in report["findings"]] == []
     assert "judged 2/2 page(s); 0 undetermined" in capsys.readouterr().out
     assert "judged 2/2 page(s); 0 undetermined" in (out / "inspect.md").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- 交叉核对
+
+
+def _cross_check_report(tmp_path):
+    return json.loads(
+        (tmp_path / "_primer" / "book" / "inspect" / "inspect.findings.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
+def _claim(page, where="table"):
+    """一条"我看见表格／插图"的视觉发现。"""
+    return {
+        "page": page,
+        "code": "table-illegible",
+        "severity": "warning",
+        "what": "a table with two named cells wraps badly",
+        "where": where,
+        "converter_hint": "widen the fourth column",
+    }
+
+
+@needs_poppler
+def test_a_visible_table_claim_on_a_body_empty_page_is_contradicted(tmp_path, capsys):
+    """第 86 页那一类错误：视觉层把别的页的内容回收给了一个没有正文的页。
+
+    页 2 是空白页（一个词都没有），视觉层却报它上面有表格——矛盾。页 1 有正文，
+    同样的表格声明就不矛盾。这正是"在正文为空、又不在 .lof/.lot 里的页上看不见表格"。
+    """
+    path = prepare(tmp_path, pages=2, toc=TOC, blank=(2,))
+
+    def transport(request):
+        return chat_reply([_claim(2), _claim(1)])
+
+    code = run_inspect(
+        load_manifest(path),
+        pages_spec="1-2",
+        base_url="http://endpoint.invalid/v1",
+        model="k3",
+        environ={"PRIMER_VISION_API_KEY": "secret"},
+        transport=transport,
+    )
+
+    # 交叉核对只标注，不改严重度、也不改退出码：它摆出分歧，裁决仍归人。
+    assert code == 0
+    report = _cross_check_report(tmp_path)
+    by_page = {item["page"]: item for item in report["findings"]}
+    assert by_page[2]["cross_check"]["contradicted"] is True
+    assert by_page[2]["cross_check"]["needs_review"] is True
+    assert by_page[2]["cross_check"]["body_words"] == 0
+    assert by_page[2]["cross_check"]["float_page"] is False
+    assert by_page[1]["cross_check"]["contradicted"] is False
+    assert by_page[1]["cross_check"]["body_words"] > 0
+    assert report["cross_check"] == {"checked": 2, "contradicted": 1, "skipped": None}
+
+    captured = capsys.readouterr().out
+    assert "[inspect] cross-check: 1 of 2 finding(s) contradict the deterministic layers" in captured
+    markdown = (tmp_path / "_primer" / "book" / "inspect" / "inspect.md").read_text(encoding="utf-8")
+    assert "- cross-check: 1 of 2 finding(s) contradict the deterministic layers" in markdown
+    assert "CONTRADICTED — cross-check: 0 body word(s)" in markdown
+    assert "cross-check: 2 body word(s)" in markdown
+
+
+@needs_poppler
+def test_a_claim_on_a_recorded_float_page_is_not_contradicted(tmp_path, capsys):
+    """``.lot`` 记下的浮动体页即使没有正文也不矛盾——满页大表本来就没有词框。"""
+    path = prepare(tmp_path, pages=2, toc=TOC, blank=(1,))
+    (tmp_path / "_primer" / "book" / "tiny.lot").write_text(
+        "\\contentsline {table}{\\numberline {1.1}{表}}{1}{table.1}%\n", encoding="utf-8"
+    )
+
+    def transport(request):
+        return chat_reply([_claim(1)])
+
+    run_inspect(
+        load_manifest(path),
+        pages_spec="1",
+        base_url="http://endpoint.invalid/v1",
+        model="k3",
+        environ={"PRIMER_VISION_API_KEY": "secret"},
+        transport=transport,
+    )
+
+    report = _cross_check_report(tmp_path)
+    cross = report["findings"][0]["cross_check"]
+    assert cross["float_page"] is True
+    assert cross["body_words"] == 0
+    assert cross["contradicted"] is False
+    assert report["cross_check"]["contradicted"] == 0
+    assert "0 of 1 finding(s) contradict" in capsys.readouterr().out
+
+
+@needs_poppler
+def test_a_heading_claim_on_a_body_empty_page_is_not_contradicted(tmp_path):
+    """判据只认 table／figure：正文为空的页上仍可能真有标题。"""
+    path = prepare(tmp_path, pages=1, toc=TOC, blank=(1,))
+
+    def transport(request):
+        return chat_reply([dict(_claim(1, where="heading"), code="heading-orphan")])
+
+    run_inspect(
+        load_manifest(path),
+        pages_spec="1",
+        base_url="http://endpoint.invalid/v1",
+        model="k3",
+        environ={"PRIMER_VISION_API_KEY": "secret"},
+        transport=transport,
+    )
+
+    report = _cross_check_report(tmp_path)
+    assert report["findings"][0]["cross_check"]["body_words"] == 0
+    assert report["findings"][0]["cross_check"]["contradicted"] is False
+    assert report["cross_check"]["contradicted"] == 0
+
+
+@needs_poppler
+def test_an_unavailable_bbox_skips_the_cross_check_without_failing(tmp_path, monkeypatch, capsys):
+    """pdftotext 不在也不能把一趟校对弄失败：跳过并在汇总里说明，发现照旧保留。"""
+    path = prepare(tmp_path, pages=1, toc=TOC)
+
+    def boom(pdf):
+        raise checks.BboxUnavailable("pdftotext is not on PATH")
+
+    monkeypatch.setattr(checks, "extract_bbox", boom)
+
+    def transport(request):
+        return chat_reply([_claim(1)])
+
+    code = run_inspect(
+        load_manifest(path),
+        pages_spec="1",
+        base_url="http://endpoint.invalid/v1",
+        model="k3",
+        environ={"PRIMER_VISION_API_KEY": "secret"},
+        transport=transport,
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "[inspect] cross-check: skipped (pdftotext is not on PATH)" in out
+    report = _cross_check_report(tmp_path)
+    assert report["cross_check"] == {
+        "checked": 0,
+        "contradicted": 0,
+        "skipped": "pdftotext is not on PATH",
+    }
+    assert report["findings"][0]["cross_check"] is None
+    markdown = (tmp_path / "_primer" / "book" / "inspect" / "inspect.md").read_text(encoding="utf-8")
+    assert "cross-check: skipped (pdftotext is not on PATH)" in markdown
+
+
+@needs_poppler
+def test_a_claim_about_a_page_that_does_not_exist_is_flagged_as_unknown(tmp_path):
+    """模型编出的页码不判矛盾，但要记下来：page_known 为假，不参与计数。"""
+    path = prepare(tmp_path, pages=1, toc=TOC)
+
+    def transport(request):
+        return chat_reply([_claim(99)])
+
+    run_inspect(
+        load_manifest(path),
+        pages_spec="1",
+        base_url="http://endpoint.invalid/v1",
+        model="k3",
+        environ={"PRIMER_VISION_API_KEY": "secret"},
+        transport=transport,
+    )
+
+    report = _cross_check_report(tmp_path)
+    cross = report["findings"][0]["cross_check"]
+    assert cross["page_known"] is False
+    assert cross["body_words"] is None
+    assert cross["contradicted"] is False
+    assert report["cross_check"]["contradicted"] == 0
+
+
+@needs_poppler
+def test_a_run_without_visual_findings_says_so_without_a_bbox_pass(tmp_path, monkeypatch, capsys):
+    """没有视觉发现可对账时不做多余的一趟 bbox，汇总仍照约定的形式打印。"""
+    path = prepare(tmp_path, pages=1, toc=TOC)
+
+    def boom(pdf):
+        raise AssertionError("the bbox pass must not run when there is nothing to annotate")
+
+    monkeypatch.setattr(checks, "extract_bbox", boom)
+
+    def transport(request):
+        return chat_reply([])
+
+    assert run_inspect(
+        load_manifest(path),
+        pages_spec="1",
+        base_url="http://endpoint.invalid/v1",
+        model="k3",
+        environ={"PRIMER_VISION_API_KEY": "secret"},
+        transport=transport,
+    ) == 0
+
+    assert "[inspect] cross-check: 0 of 0 finding(s) contradict the deterministic layers" in (
+        capsys.readouterr().out
+    )
+
+
+# ---------------------------------------------------------------- 构建新鲜度
+
+
+def _make_newer(path, reference, seconds=10.0):
+    stamp = reference.stat().st_mtime + seconds
+    os.utime(path, (stamp, stamp))
+
+
+@needs_poppler
+def test_inspect_warns_when_the_manuscript_is_newer_than_the_build(tmp_path, capsys):
+    """贵的那一趟开跑前先喊：稿件比 .tex 新，看的其实是旧版书。只打印，不落发现。"""
+    path = prepare(tmp_path, pages=1, toc=TOC)
+    tex = tmp_path / "_primer" / "book" / "tiny.tex"
+    tex.write_text("% fixture\n", encoding="utf-8")
+    _make_newer(tmp_path / "sources" / "one.md", tex)
+
+    def transport(request):
+        return chat_reply([])
+
+    code = run_inspect(
+        load_manifest(path),
+        pages_spec="1",
+        base_url="http://endpoint.invalid/v1",
+        model="k3",
+        environ={"PRIMER_VISION_API_KEY": "secret"},
+        transport=transport,
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "WARNING: stale build" in out
+    assert "sources/one.md" in out
+    assert "run build before trusting this report" in out
+    report = _cross_check_report(tmp_path)
+    assert all(item["code"] != "stale-build" for item in report["findings"])
+
+
+@needs_poppler
+def test_inspect_is_silent_when_the_build_is_fresh(tmp_path, capsys):
+    path = prepare(tmp_path, pages=1, toc=TOC)
+    tex = tmp_path / "_primer" / "book" / "tiny.tex"
+    tex.write_text("% fixture\n", encoding="utf-8")
+    _make_newer(tex, tmp_path / "sources" / "one.md")
+
+    def transport(request):
+        return chat_reply([])
+
+    run_inspect(
+        load_manifest(path),
+        pages_spec="1",
+        base_url="http://endpoint.invalid/v1",
+        model="k3",
+        environ={"PRIMER_VISION_API_KEY": "secret"},
+        transport=transport,
+    )
+
+    assert "stale build" not in capsys.readouterr().out
+

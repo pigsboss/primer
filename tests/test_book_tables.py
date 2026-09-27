@@ -60,6 +60,50 @@ def test_column_widths_are_proportional_to_natural_width():
     assert layout.columns[1] > layout.columns[0]
 
 
+# ---------------------------------------------------------------- 长词元的计宽
+
+
+def test_a_pathologically_long_token_is_measured_by_its_longest_piece():
+    """43 字符的链接标签在连字符处断得开：最长的一段只有 9 个字。"""
+    assert tables.longest_unbreakable_piece("civil-space-shortfall-ranking-july-2024") == 9
+    # 无分隔符的长串靠 break_long_runs 每 10 个字符补的断点：最长段就是 10
+    assert tables.longest_unbreakable_piece("a" * 43) == 10
+    assert tables.longest_unbreakable_piece("Propulsion:") == 11
+
+
+def test_natural_width_leaves_short_tokens_and_cjk_alone():
+    """只有病态长的词元改口径；汉字与短词元的自然宽度一个单位都不变。"""
+    for text in ("中文单元格，短字串", "Propulsion: Nuclear", "评分 7.17/9（2024 年 7 月）"):
+        assert tables.natural_width(text) == tables.display_width(text)
+
+
+def test_natural_width_counts_the_longest_piece_of_a_long_token():
+    token = "civil-space-shortfall-ranking-july-2024"
+    cell = f"属美国政府认定的全局性缺口 {token} 一览"
+
+    assert tables.natural_width(cell) == tables.display_width(cell) - len(token) + 9
+
+
+def test_a_long_token_no_longer_owns_the_table_width(monkeypatch):
+    """同一个表：按"整串"计宽时第三列吃掉一半，按"最长不可断段"计宽时前两列松一口气。"""
+    label = "civil-space-shortfall-ranking-july-2024"
+    rows = [
+        ["模块", "NASA 门类", "缺口编号与定位"],
+        ["核电推组合体（载人探索主推）", "Propulsion: Nuclear", f"属全局性缺口 {label}"],
+        ["低功率核电推（无人深空探测可用）", "Propulsion: Nuclear", "评分区间 4.86–6.81"],
+    ]
+
+    fixed, _ = tables.plan_table(rows, TINY)
+    monkeypatch.setattr(tables, "natural_width", tables.display_width)
+    squeezed, _ = tables.plan_table(rows, TINY)
+
+    assert fixed.columns[0] > squeezed.columns[0]
+    assert fixed.columns[1] > squeezed.columns[1]
+    assert fixed.columns[2] < squeezed.columns[2]
+    # 列宽仍然归一：Y 列权重的和必须等于列数
+    assert abs(sum(fixed.columns) - 1) < 1e-9
+
+
 def test_scale_tier_is_used_when_a_slight_shrink_beats_wrapping():
     # 单行、两列、自然宽度略超版心：等比缩到页宽比换行更保形。
     layout, findings = tables.plan_table([["甲" * 24, "乙" * 24]], TINY)

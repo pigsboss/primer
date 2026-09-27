@@ -53,6 +53,17 @@ MIN_SCALE = 0.7
 # 整表高度上限（占版心高度的比例）。
 HEIGHT_LIMIT = 0.95
 
+# "病态长词元"的门槛：拉丁词元达到这个长度就不再按整串计宽，改按最长不可断段计
+# （见 :func:`natural_width`）。取值与 :data:`primer.book.tex.PROSE_RUN_MIN` 一致——
+# 那一条也正是"正文里 ≥20 字符的 ASCII 串每 10 个字符补一个断点"的判据。
+LONG_TOKEN_MIN = 20
+# 词元内部本来就能断的位置：LaTeX 在连字符与斜线之后即可断行。
+TOKEN_BREAK_RE = re.compile(r"[-/]")
+# 无分隔符的长段每隔这么多字符补一个断点（与 tex.PROSE_RUN_BREAK 一致）。
+TOKEN_RUN_BREAK = 10
+# 拉丁词元：ASCII 可打印非空白字符。汉字与全角标点不属于它，天然把词元截断。
+LATIN_TOKEN_RE = re.compile(r"[\x21-\x7e]+")
+
 _PAPER_MM = {
     "a4paper": (210.0, 297.0),
     "a5paper": (148.0, 210.0),
@@ -112,13 +123,59 @@ def display_width(text: str) -> int:
     return sum(2 if ord(char) > CJK_THRESHOLD else 1 for char in text)
 
 
+def longest_unbreakable_piece(token: str) -> int:
+    """一个**长**拉丁词元里最长的一段"排不下也断不开"的内容（显示单位）。
+
+    断点取 LaTeX 本来就能断的地方：连字符与斜线之后（:data:`TOKEN_BREAK_RE`），
+    以及无分隔符长段里由 ``\\allowbreak{}`` 补出来的每 :data:`TOKEN_RUN_BREAK` 个
+    字符一处（:data:`LONG_TOKEN_MIN` 是那条规则的触发长度，与
+    :func:`primer.book.tex.break_long_runs` 同一套判据）。返回的是最宽的那一段——
+    这一段才是列宽无论如何都容不下的下界。
+    """
+    widest = 0
+    for piece in TOKEN_BREAK_RE.split(token):
+        if not piece:
+            continue
+        if len(piece) < LONG_TOKEN_MIN:
+            widest = max(widest, display_width(piece))
+            continue
+        for start in range(0, len(piece), TOKEN_RUN_BREAK):
+            widest = max(widest, display_width(piece[start : start + TOKEN_RUN_BREAK]))
+    return widest
+
+
+def natural_width(text: str) -> int:
+    """单元格的"自然宽度"（显示单位）：长拉丁词元只按最长不可断段计。
+
+    与 :func:`display_width` 的差别只有一处——**病态长**（≥ :data:`LONG_TOKEN_MIN`）
+    的拉丁词元改用 :func:`longest_unbreakable_piece`。目的是不让一个长标识符或
+    链接标签独自占满整张表的自然宽度预算：那会让分配器把列宽按"整串"给它，把
+    其余各列挤到只能容纳两三个字，汉字于是在词中断开。
+
+    汉字、短词元、空格与全角标点一律照旧按 :func:`display_width` 计——CJK 单元格
+    的自然宽度仍是"一个字都不能少"，不会因为这条规则变成"反正能断，随便给"。
+    """
+    width = 0
+    position = 0
+    for matched in LATIN_TOKEN_RE.finditer(text):
+        width += display_width(text[position : matched.start()])
+        token = matched.group()
+        width += (
+            longest_unbreakable_piece(token)
+            if len(token) >= LONG_TOKEN_MIN
+            else display_width(token)
+        )
+        position = matched.end()
+    return width + display_width(text[position:])
+
+
 def plan_table(rows: Sequence[Sequence[str]], typography: Typography, location: str = "") -> Tuple[TableLayout, List[Finding]]:
     """给出表格排版方案与相关发现。"""
     findings: List[Finding] = []
     columns = max((len(row) for row in rows), default=1)
     rows = [list(row) + [""] * (columns - len(row)) for row in rows]
     natural = [
-        max(display_width(_plain(cell)) for cell in (row[index] for row in rows))
+        max(natural_width(_plain(cell)) for cell in (row[index] for row in rows))
         for index in range(columns)
     ]
     natural_total = sum(natural) + _padding(columns)

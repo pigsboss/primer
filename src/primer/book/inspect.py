@@ -41,6 +41,23 @@
 每次请求的 token 用量都从回信的 ``usage`` 里取回来并累计：思考型模型的**输出**侧
 （推理链也算 completion tokens）才是账单上的大头，所以 prompt 与 completion 分开
 记，汇总时一并打印。清单没有配每千 token 的价格就不给费用估算——不猜价钱。
+
+视觉结论是概率性的，确定性层（``check --deep``，见 :mod:`primer.book.checks`）是
+确定的，两者的结论过去靠人手工对账——已经真出过一次错：视觉通路把第 79 页的内容
+回收给了第 86 页（表格、两个有名字的单元格），而第 86 页总共只有 5 个字，全是页眉
+与页码。所以每趟 ``inspect`` 收尾都会做一次**交叉核对**：拿一次 ``pdftotext -bbox``
+（不渲染、不联网、不额外请求）算出每页的正文词数、覆盖率、表格孤字行数与"是不是
+``.lof``／``.lot`` 记下的浮动体页"，贴到每条视觉发现上（JSON 的 ``cross_check``
+字段、markdown 里紧跟该条发现的一行），并统计其中有多少条与确定性层**矛盾**：
+
+**声称看见表格／插图内容（``where`` 是 ``table`` 或 ``figure``），而它指的页一个
+正文字词都没有、又不是记下的浮动体页**——那一页上不可能有它说的东西。命中的发现
+标 ``contradicted``／``needs_review``，但**不丢弃**：视觉层偶尔也可能是对的，交叉
+核对是把分歧摆出来，不是替人裁决。PDF 或 bbox 取不到时跳过，并在汇总里说明。
+
+``inspect`` 是贵的那一趟，所以开工前先查一次构建新鲜度（与 ``check --deep`` 的
+``stale-build`` 共用同一个 :func:`primer.book.checks.stale_build`）：稿件比 ``.tex``
+新时打印一行警告——这一趟看的其实是旧版书。只打印，不落发现。
 """
 
 from __future__ import annotations
@@ -55,11 +72,12 @@ import shutil
 import urllib.error
 import urllib.request
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..paths import relative_to_root
+from . import checks
 from . import markdown as md
 from . import pdf as pdf_tools
 from .builder import BookBuilder
@@ -98,6 +116,9 @@ SEVERITY_ALIASES = {
     "low": "info", "note": "info", "hint": "info", "suggestion": "info",
 }
 
+# 评分规则不列"词被拆到两行"（words broken mid-word）：中文可在任意两字之间换行，一个
+# 两字词跨两行是正常的中文排版，不是缺陷——视觉通每轮都把它报成缺陷（单张表就报五个），
+# 全是噪声。真正的表格缺陷是"一行只剩一个汉字"（孤字/寡字）与单元格相撞，别把这条加回来。
 RUBRIC = """\
 # Visual quality-assurance of a typeset book PDF
 
@@ -109,8 +130,8 @@ page alone can show.
 
 ## What counts as a defect
 
-1. A table scaled or wrapped below legibility: cells colliding, words broken mid-word,
-   single-character orphan lines, or a header drifting away from its rows.
+1. A table scaled or wrapped below legibility: cells colliding, single-character orphan
+   lines, or a header drifting away from its rows.
 2. A figure too small to read, blank, all-grey, or cropped at the frame.
 3. A heading orphaned at the foot of a page, or stranded from its text by a page break.
 4. A landscape page used where a portrait page would do, or a wide table left in portrait
@@ -188,7 +209,11 @@ class PageChoice:
 
 @dataclass(frozen=True)
 class VisualFinding:
-    """一条视觉发现：看得见的缺陷 + 最可能该改的转换器部件。"""
+    """一条视觉发现：看得见的缺陷 + 最可能该改的转换器部件。
+
+    ``cross_check`` 是运行末尾补上的确定性对账（见 :func:`cross_check_annotation`）：
+    默认 ``None``，因为视觉回信本身不知道页面上有多少字。
+    """
 
     page: int
     code: str
@@ -196,6 +221,7 @@ class VisualFinding:
     what: str
     where: str
     converter_hint: str
+    cross_check: Optional[Mapping[str, object]] = None
 
     def as_dict(self) -> Mapping[str, object]:
         return {
@@ -205,7 +231,96 @@ class VisualFinding:
             "what": self.what,
             "where": self.where,
             "converter_hint": self.converter_hint,
+            "cross_check": self.cross_check,
         }
+
+
+# 视觉发现里"声称看见浮动体内容"的 ``where`` 取值。只有这两类才会撞上"这一页根本
+# 没有正文"的判据——heading、page-geometry 之类的发现与页面上有没有字无关。
+CONTRADICTION_WHERE = ("table", "figure")
+
+
+@dataclass(frozen=True)
+class PageFacts:
+    """一页的确定性页级事实，逐页算一次，供所有落在这页上的视觉发现共用。
+
+    ``body_words``／``body_coverage`` 是正文墨迹（页眉与页码不算，见
+    :func:`primer.book.checks.page_near_blank`）；``orphan_lines`` 是该页
+    ``table-orphan-line`` 的**真实计数**（不受报告上限影响）；``float_page`` 表示
+    该页被 ``.lof``／``.lot`` 记为图／表题注所在页。
+    """
+
+    page: int
+    body_words: int
+    body_coverage: float
+    orphan_lines: int
+    float_page: bool
+
+
+def page_facts(
+    pages: Sequence[checks.BboxPage],
+    geometry: Optional[checks.Geometry],
+    float_pages: Collection[int],
+    orphan_counts: Mapping[int, int],
+) -> Dict[int, PageFacts]:
+    """把页级检查已经算出来的账目收成"页码 → 事实"。
+
+    覆盖率的算术与 :func:`primer.book.checks.page_near_blank` 逐字一致（正文墨迹的
+    词框面积和 ÷ 页面面积）；没有版心几何量时退回整页词框，与那条检查的降级一致。
+    """
+    excluded = set(float_pages)
+    facts: Dict[int, PageFacts] = {}
+    for page in pages:
+        words = page.words if geometry is None else checks._body_words(page, geometry)
+        area = page.width * page.height
+        covered = sum(
+            max(word.right - word.left, 0.0) * max(word.bottom - word.top, 0.0)
+            for word in words
+        )
+        facts[page.number] = PageFacts(
+            page=page.number,
+            body_words=len(words),
+            body_coverage=(covered / area) if area > 0 else 0.0,
+            orphan_lines=orphan_counts.get(page.number, 0),
+            float_page=page.number in excluded,
+        )
+    return facts
+
+
+def cross_check_annotation(
+    finding: VisualFinding, facts: Optional[PageFacts]
+) -> Mapping[str, object]:
+    """一条视觉发现与确定性页级事实的对账。
+
+    **矛盾判据**：发现声称看见表格／插图内容（``where`` 是 ``table`` 或 ``figure``），
+    而它指的页**一个正文字词都没有**，且**不是** ``.lof``／``.lot`` 记下的浮动体页
+    ——视觉层不可能看见那一页上并不存在的表格或插图。这正是页 86 那一类错误：视觉
+    通路把页 79 的内容回收给了页 86，而页 86 只有 5 个字（页眉与页码）。
+
+    命中时 ``contradicted`` 与 ``needs_review`` 都为真。**不丢弃**这条发现：视觉层
+    偶尔也可能对（例如确定性层读错了页、或浮动体页没被 ``.lof``／``.lot`` 记全），
+    交叉核对的作用是把分歧摆到人面前，不是替人裁决。
+
+    ``facts`` 为 ``None``（这一页不在 PDF 里，页码多半是模型编的）时不判矛盾，
+    只记 ``page_known: false``——那属于另一类缺陷，本规则不越俎代庖。
+    """
+    known = facts is not None
+    contradicted = bool(
+        known
+        and finding.where in CONTRADICTION_WHERE
+        and facts.body_words == 0
+        and not facts.float_page
+    )
+    return {
+        "page": finding.page,
+        "page_known": known,
+        "body_words": facts.body_words if known else None,
+        "body_coverage": round(facts.body_coverage, 4) if known else None,
+        "orphan_lines": facts.orphan_lines if known else None,
+        "float_page": facts.float_page if known else None,
+        "contradicted": contradicted,
+        "needs_review": contradicted,
+    }
 
 
 @dataclass(frozen=True)
@@ -895,6 +1010,10 @@ class _Controller:
         self.choices: List[PageChoice] = []
         self.page_count = 0
         self.images_sent = 0
+        # 交叉核对账目：标了几个视觉发现、其中几个与确定性层矛盾、没做的话为什么没做。
+        self.cross_check_checked = 0
+        self.cross_check_contradicted = 0
+        self.cross_check_skipped: Optional[str] = None
         # 覆盖率账目：发出去的每一页要么有裁决（judged），要么落一条 vision-undetermined。
         self.pages_sent = 0
         self.judged: set = set()
@@ -907,6 +1026,7 @@ class _Controller:
     # ------------------------------------------------------------ 主流程
 
     def run(self, json_path: Optional[Path]) -> int:
+        self._warn_if_stale()
         pdf = self.builder.plan.pdf
         if not pdf.is_file():
             self.findings.append(
@@ -941,7 +1061,24 @@ class _Controller:
             f"{total_bytes} bytes under {relative_to_root(self.pages_dir, self.builder.project_root)}"
         )
         self._call_vision()
+        self._cross_check(pdf)
         return self._finish(json_path, total_bytes)
+
+    def _warn_if_stale(self) -> None:
+        """稿件比产物新时先喊一声：这一趟看的是旧版书，报告别当真。
+
+        与 ``check --deep`` 的 ``stale-build`` 共用 :func:`primer.book.checks.stale_build`。
+        ``inspect`` 才是贵的那一趟，而且它的结论是概率性的——拿它去核对一本已经改过
+        的稿子，比确定性检查更容易误事。只打印，不落发现：这不是版面缺陷。
+        """
+        stale = checks.stale_build(self.manifest, self.builder.plan)
+        if not stale:
+            return
+        files = ", ".join(item.location for item in stale)
+        print(
+            f"[inspect] WARNING: stale build — {len(stale)} manuscript source(s) newer than the "
+            f".tex ({files}); run build before trusting this report"
+        )
 
     def _select(self, rotations: Mapping[int, int], texts: Sequence[str]) -> List[PageChoice]:
         toc = self.builder.out_dir / f"{self.manifest.output.jobname}.toc"
@@ -1288,6 +1425,60 @@ class _Controller:
             "the table below; report the printed page number, not the image index."
         )
 
+    # ------------------------------------------------------------ 交叉核对
+
+    def _cross_check(self, pdf: Path) -> None:
+        """把每一条视觉发现与确定性页级事实对账（一次 ``pdftotext -bbox``，不渲染、不联网）。
+
+        页级事实全部复用 :mod:`primer.book.checks`：正文词数与覆盖率走
+        :func:`page_facts`（与 :func:`primer.book.checks.page_near_blank` 同一套算术），
+        ``table-orphan-line`` 计数走 :func:`primer.book.checks.orphan_lines_by_page`，
+        载有题注的页走 :func:`primer.book.checks._float_page_numbers`。PDF 或 bbox 取不到
+        时跳过并在汇总里说明原因，不让一次交叉核对把整趟校对弄失败。
+
+        矛盾判据见 :func:`cross_check_annotation`。命中的发现**照样保留**，只是标上
+        ``contradicted``／``needs_review``——要摆出分歧，不是替人裁决。
+        """
+        if not any(isinstance(item, VisualFinding) for item in self.findings):
+            # 没有视觉发现可对账（比如端点没配）：不做多余的 bbox 一趟。
+            print(self._cross_check_line())
+            return
+        try:
+            pages = checks.extract_bbox(pdf)
+        except (checks.BboxUnavailable, OSError) as error:
+            self.cross_check_skipped = str(error)
+            print(self._cross_check_line())
+            return
+        plan = self.builder.plan
+        geometry = checks.parse_geometry(checks._read_text(plan.log) or "")
+        float_pages = checks._float_page_numbers(
+            checks._read_text(plan.lof), checks._read_text(plan.lot)
+        )
+        facts = page_facts(
+            pages, geometry, float_pages, checks.orphan_lines_by_page(pages, geometry)
+        )
+        annotated: List[object] = []
+        for item in self.findings:
+            if isinstance(item, VisualFinding):
+                item = replace(
+                    item, cross_check=cross_check_annotation(item, facts.get(item.page))
+                )
+                self.cross_check_checked += 1
+                if item.cross_check is not None and item.cross_check["contradicted"]:
+                    self.cross_check_contradicted += 1
+            annotated.append(item)
+        self.findings = annotated
+        print(self._cross_check_line())
+
+    def _cross_check_line(self) -> str:
+        """一行汇总：对账了几个、几个矛盾；没做成的话说明为什么。"""
+        if self.cross_check_skipped is not None:
+            return f"[inspect] cross-check: skipped ({self.cross_check_skipped})"
+        return (
+            f"[inspect] cross-check: {self.cross_check_contradicted} of "
+            f"{self.cross_check_checked} finding(s) contradict the deterministic layers"
+        )
+
     # ------------------------------------------------------------ 报告
 
     def _finish(self, json_path: Optional[Path], total_bytes: int = 0) -> int:
@@ -1350,6 +1541,11 @@ class _Controller:
                     for page, reason in sorted(self.undetermined.items())
                 ],
             },
+            "cross_check": {
+                "checked": self.cross_check_checked,
+                "contradicted": self.cross_check_contradicted,
+                "skipped": self.cross_check_skipped,
+            },
             "findings": [item.as_dict() for item in self.findings],
             "summary": summarize(self.findings),
             "failed": self._failed(),
@@ -1411,6 +1607,7 @@ class _Controller:
             f"+ completion {self.completion_tokens} tokens "
             f"= {self.prompt_tokens + self.completion_tokens} tokens",
             f"- findings: {counts['error']} error, {counts['warning']} warning, {counts['info']} info",
+            f"- cross-check: {self._cross_check_summary()}",
             "",
         ]
         grouped: Dict[str, List[object]] = {}
@@ -1422,8 +1619,22 @@ class _Controller:
             lines.append(f"## {code} ({len(items)}, {items[0].severity})")
             for item in items:
                 lines.append(f"- {_describe(item)}")
+                note = _cross_check_note(item)
+                if note:
+                    lines.append(f"  - {note}")
             lines.append("")
         return "\n".join(lines).rstrip() + "\n"
+
+    def _cross_check_summary(self) -> str:
+        """汇总里的一句话，与命令行那一行同源。"""
+        if self.cross_check_skipped is not None:
+            return f"skipped ({self.cross_check_skipped})"
+        if not self.cross_check_checked:
+            return "no visual finding to cross-check"
+        return (
+            f"{self.cross_check_contradicted} of {self.cross_check_checked} finding(s) "
+            "contradict the deterministic layers"
+        )
 
     def _vision_ready(self) -> bool:
         return bool(self.base_url and self.model and self.environ.get(self.key_env))
@@ -1472,3 +1683,27 @@ def _describe(item: object) -> str:
         location = f" ({item.location})" if item.location else ""
         return f"{item.message}{location}"
     return str(item)
+
+
+def _cross_check_note(item: object) -> str:
+    """一条视觉发现的交叉核对说明（markdown 里缩进排在该条发现下面）。
+
+    只有视觉发现有 ``cross_check``；``Finding``（端点故障、覆盖缺口之类）没有页码
+    事实可对，返回空串。矛盾的那条把 ``CONTRADICTED`` 顶在最前面，与汇总里的计数
+    对得上。
+    """
+    cross = getattr(item, "cross_check", None)
+    if not cross:
+        return ""
+    if not cross.get("page_known", False):
+        return (
+            f"cross-check: the deterministic layers have no page {cross['page']} in this PDF; "
+            "the finding was not judged"
+        )
+    verdict = "CONTRADICTED — " if cross["contradicted"] else ""
+    return (
+        f"{verdict}cross-check: {cross['body_words']} body word(s), "
+        f"{float(cross['body_coverage']) * 100:.2f}% of the page covered, "
+        f"{cross['orphan_lines']} table-orphan-line(s), "
+        f"{'a recorded float page' if cross['float_page'] else 'not a recorded float page'}"
+    )

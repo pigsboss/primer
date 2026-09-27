@@ -314,6 +314,37 @@ HEADING_MARK_COMMANDS = {"chapter": "chaptermark", "section": "sectionmark"}
 MARK_STRIP_RE = re.compile(r"[`*]")
 MARK_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 
+# ---------------------------------------------------------------- 章标题断行：常量
+
+# 章标题的字号：导言区模板给 ``chapter/format`` 定的 ``\zihao{2}``（二号）。
+# 与 :func:`primer.book.preamble.body_points` 是同一张字号表，不写死磅值。
+CHAPTER_ZIHAO = "2"
+# 自动编号的文本形态：非附录章是 ``第七章``／``第十四章``（ctex 的
+# ``\CTEXthechapter``），附录章是 ``附录 A``（``\appendix`` 后重新编号）。
+CHAPTER_NUMBER_PREFIX = "第"
+CHAPTER_NUMBER_SUFFIX = "章"
+APPENDIX_NUMBER_PREFIX = "附录 "
+# 编号与题名之间的 ``\quad``（ctex 的 ``chapter/aftername``）：一个全角字宽。
+CHAPTER_AFTERNAME_UNITS = 2
+# 最后一行只剩这么多显示单位（一个全角字）就是"标题末尾吊了一个孤字"。
+HEADING_ORPHAN_UNITS = 2
+CHINESE_DIGITS = "一二三四五六七八九十"
+# 行首禁则：这些字符不许出现在一行的开头，因此断点不能落在它们之前（、和 ，同属
+# 此列——"、"起行是中文排版里最刺眼的一种断法）。
+LINE_START_FORBIDDEN = "，。、；：？！）］｝」』》〉”’…—·%,.;:!?)]}"
+# 断行的优先落点：标点与常见连词之后。中文里那正是句子自然停顿的地方，按它断行
+# 读起来是"短语 + 短语"；没有这样的落点时才退回按宽度均分，宁可"劈词"也不要溢出。
+PREFERRED_BREAK_AFTER = "，。、；：？！）］｝」』》〉”’…—" + "与和及或"
+# 标题里不能从中断开的构造：markdown 链接、行内代码、行内公式、强调。断点落在
+# 它们中间会把标记劈成两半，所以这些位置一律不算"安全断点"。
+UNSAFE_BREAK_SPANS = (
+    re.compile(r"\[[^\]]*\]\([^)]*\)"),
+    re.compile(r"`[^`]*`"),
+    re.compile(r"\$[^$\n]*\$"),
+    re.compile(r"\*\*[^*]*\*\*"),
+    re.compile(r"\*[^*\n]*\*"),
+)
+
 
 def head_mark_budget(typography: Typography) -> int:
     """页眉里一条标记的**题名部分**可用的显示单位数。
@@ -401,6 +432,155 @@ def _head_mark_lines(
     )
 
 
+# ---------------------------------------------------------------- 章标题断行：判据与发射
+
+
+def chinese_number(number: int) -> str:
+    """1—99 的汉字写法：章号用（``1`` → ``一``、``14`` → ``十四``）。"""
+    if number <= 0:
+        return str(number)
+    if number <= 10:
+        return CHINESE_DIGITS[number - 1]
+    if number < 20:
+        return "十" + CHINESE_DIGITS[number - 11]
+    tens, ones = divmod(number, 10)
+    return CHINESE_DIGITS[tens - 1] + "十" + (CHINESE_DIGITS[ones - 1] if ones else "")
+
+
+def chapter_number_text(number: int) -> str:
+    """非附录章的自动编号文本（与 ctex 的 ``\\CTEXthechapter`` 一致）。"""
+    return f"{CHAPTER_NUMBER_PREFIX}{chinese_number(number)}{CHAPTER_NUMBER_SUFFIX}"
+
+
+def appendix_number_text(index: int) -> str:
+    """附录章的自动编号文本：``附录 A``、``附录 B``…（``\\appendix`` 后重编号）。"""
+    return APPENDIX_NUMBER_PREFIX + chr(ord("A") + index)
+
+
+def chapter_title_capacity(typography: Typography, number_text: str) -> int:
+    """一章标题的**一行**能容纳的显示单位数（已扣掉自动编号与 ``\\quad``）。
+
+    字号取模板给章标题定的 :data:`CHAPTER_ZIHAO`，版心宽走
+    :func:`primer.book.tables._metrics` 的度量——与页眉标记预算
+    (:func:`head_mark_budget`) 同一套算术。编号本身占掉的单位由
+    :func:`primer.book.tables.display_width` 给出：``第七章`` 是 6、``第十四章``
+    是 8，差出的一格正是"同一个题名在不同章号下换行不同"的原因。量标题之前必须
+    先扣掉它——漏掉这一项会把每个标题都算宽一格，把本来好好的标题误判成孤字。
+    """
+    font = preamble.body_points(CHAPTER_ZIHAO)
+    capacity = tables._capacity(tables._metrics(typography, "portrait"), font)
+    return int(capacity - tables.display_width(number_text) - CHAPTER_AFTERNAME_UNITS)
+
+
+def _safe_break_positions(title: str) -> List[bool]:
+    """``title[i]`` 之前能不能插 ``\\``（返回下标 0…len(title) 的布尔表）。
+
+    落在链接／行内代码／行内公式／强调内部的字符一律不许断——它们在 markdown 里
+    是一个整体，劈开就渲染不成。
+    """
+    safe = [True] * (len(title) + 1)
+    for pattern in UNSAFE_BREAK_SPANS:
+        for matched in pattern.finditer(title):
+            for position in range(matched.start() + 1, matched.end()):
+                safe[position] = False
+    return safe
+
+
+def _wrap_by_units(title: str, capacity: int) -> List[str]:
+    """按显示宽度贪心折行——用来预演 LaTeX 的自然换行。"""
+    lines: List[str] = []
+    current = ""
+    used = 0
+    for char in title:
+        width = tables.display_width(char)
+        if current and used + width > capacity:
+            lines.append(current)
+            current = ""
+            used = 0
+        current += char
+        used += width
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _balanced_lines(title: str, capacity: int, count: int) -> Optional[List[str]]:
+    """把标题按显示宽度均分成 ``count`` 行；断点只能落在安全位置。
+
+    候选断点要同时满足三件事：不在链接／代码／公式／强调内部（:func:`_safe_break_positions`）、
+    不使下一行以 :data:`LINE_START_FORBIDDEN` 里的标点起行、且前一段放得下
+    ``capacity``。在候选里先看 :data:`PREFERRED_BREAK_AFTER`（标点与连词之后），
+    再退回按累计宽度最接近均分点的位置。
+
+    有任何一段放不下 ``capacity``、或找不到安全断点，就返回 ``None``——宁可不改，
+    也不发射一个可能溢出版心的断行。
+    """
+    widths = [tables.display_width(char) for char in title]
+    cumulative = [0] * (len(title) + 1)
+    for index, width in enumerate(widths):
+        cumulative[index + 1] = cumulative[index] + width
+    safe = _safe_break_positions(title)
+    total = cumulative[len(title)]
+    parts: List[str] = []
+    start = 0
+    for index in range(1, count):
+        target = total * index / count
+        candidates = [
+            position
+            for position in range(start + 1, len(title))
+            if safe[position]
+            and title[position] not in LINE_START_FORBIDDEN
+            and cumulative[position] - cumulative[start] <= capacity
+        ]
+        if not candidates:
+            return None
+        preferred = [position for position in candidates if title[position - 1] in PREFERRED_BREAK_AFTER]
+        pool = preferred or candidates
+        position = min(pool, key=lambda item: abs(cumulative[item] - target))
+        parts.append(title[start:position])
+        start = position
+    parts.append(title[start:])
+    if any(tables.display_width(part) > capacity for part in parts):
+        return None
+    if tables.display_width(parts[-1]) <= HEADING_ORPHAN_UNITS:
+        return None
+    return parts
+
+
+def chapter_title_lines(title: str, capacity: int) -> Optional[List[str]]:
+    r"""标题自然换行会把最后一行留成孤字时，返回显式断行后的各行；否则 ``None``。
+
+    判据是**预演**：按 :func:`_wrap_by_units` 贪心折行，若折出的最后一行不超过
+    :data:`HEADING_ORPHAN_UNITS`（一个全角字）且确实折成了多行，就按行数把标题重新
+    均分（:func:`_balanced_lines`）。只在真需要时返回 ``None`` 以外的东西，所以绝大
+    多数标题的 ``\chapter{...}`` 一个字节都不变。
+
+    这是**预判**，不是测量：编号宽度按 ctex 的规则算（见
+    :func:`chapter_title_capacity`），而实际排版由 LaTeX 决定。真正的裁决权在
+    构建后跑 :func:`primer.book.checks.heading_orphan_line`——那条检查量的是印出来
+    的 PDF。
+    """
+    natural = _wrap_by_units(title, capacity)
+    if len(natural) < 2 or tables.display_width(natural[-1]) > HEADING_ORPHAN_UNITS:
+        return None
+    return _balanced_lines(title, capacity, len(natural))
+
+
+def _heading_command_line(command: str, raw_title: str, number_text: Optional[str], typography: Typography) -> str:
+    r"""一条结构命令及其花括号标题，必要时改发带可选参数的显式断行版本。
+
+    ``\chapter[<完整题名>]{<断了行的题名>}``：可选参数供目录与页眉使用（保持完整、
+    不折行），强制参数只控制版面上的显示。只对**确定要断**的章标题这么做。
+    """
+    if number_text is None:
+        return rf"\{command}{{{render_inline(raw_title)}}}"
+    parts = chapter_title_lines(raw_title, chapter_title_capacity(typography, number_text))
+    if parts is None:
+        return rf"\{command}{{{render_inline(raw_title)}}}"
+    display = r"\\".join(render_inline(part) for part in parts)
+    return rf"\{command}[{render_inline(raw_title)}]{{{display}}}"
+
+
 # ---------------------------------------------------------------- 块
 
 
@@ -412,6 +592,8 @@ def render_blocks(
     appendix: bool = False,
     location: str = "",
     marks: Optional[List[str]] = None,
+    chapter_start: int = 1,
+    appendix_number_start: int = 0,
 ) -> List[str]:
     """块对象序列 → LaTeX 行序列。
 
@@ -424,17 +606,28 @@ def render_blocks(
     汇总成一条 ``running-head-truncated`` 发现。章、节的题名太长会与另一条标记
     叠印（LaTeX 不报 overfull），所以过长的题名在这里就截短，并紧接着结构命令
     发一条显式标记。
+
+    ``chapter_start``／``appendix_number_start`` 是本篇第一个章号的起点（连续
+    编号由 LaTeX 给，这里只为**量**自动编号占多宽：见
+    :func:`chapter_title_capacity`）。缺省值等于"全书第一篇"，与只装配单篇的
+    调用方一致。
     """
     out: List[str] = []
     labelled = False
     budget = head_mark_budget(typography)
+    chapter_number = chapter_start
+    appendix_number = appendix_number_start
     for index, block in enumerate(blocks):
         if isinstance(block, PartBanner):
             raw_title = part_title(block.title, appendix)
             command = "chapter" if appendix else "part"
+            number_text = None
+            if command == "chapter":
+                number_text = appendix_number_text(appendix_number)
+                appendix_number += 1
             before, after = _head_mark_lines(command, raw_title, budget, marks)
             out.extend(before)
-            out.append(rf"\{command}{{{render_inline(raw_title)}}}")
+            out.append(_heading_command_line(command, raw_title, number_text, typography))
             out.extend(after)
             if part_label and not labelled:
                 out.append(rf"\label{{{part_label}}}")
@@ -444,9 +637,13 @@ def render_blocks(
             command = HEADING_COMMANDS.get(level)
             if command:
                 raw_title = strip_heading_number(block.text)
+                number_text = None
+                if command == "chapter":
+                    number_text = chapter_number_text(chapter_number)
+                    chapter_number += 1
                 before, after = _head_mark_lines(command, raw_title, budget, marks)
                 out.extend(before)
-                out.append(rf"\{command}{{{render_inline(raw_title)}}}")
+                out.append(_heading_command_line(command, raw_title, number_text, typography))
                 out.extend(after)
         elif isinstance(block, Paragraph):
             out.append(render_inline(block.text) + r"\par")

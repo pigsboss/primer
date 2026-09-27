@@ -7,7 +7,7 @@ r"""确定性质检（``check --deep``）：只看文本层就能抓到的那一
 ``.log`` 里的版心几何、以及 PDF 经 ``pdftotext -bbox`` 给出的词框。确定、免费、
 召回率 100%。
 
-十个检查各是一个纯函数，只吃字符串与路径，便于单测；:func:`run_checks` 负责读盘
+十二个检查各是一个纯函数，只吃字符串与路径，便于单测；:func:`run_checks` 负责读盘
 并把它们汇总成发现列表：
 
 * ``markdown-residue``（error）：正文里残留的 markdown 语法（含行首的 ``>`` 引用标记）；
@@ -18,9 +18,13 @@ r"""确定性质检（``check --deep``）：只看文本层就能抓到的那一
 * ``text-out-of-block``（warning）：词框越过版心左右边界（横向页改量纸张边距）；
 * ``running-head-collision``（warning）：页眉里左右两条标记叠印——LaTeX 看不见的缺陷；
 * ``table-orphan-line``（info）：表格某格断行后只剩一个汉字的行；
-* ``page-near-blank``（info）：正文墨迹近乎空白的一页（页眉与页码不计）；
+* ``heading-orphan-line``（info）：标题断行后最后一行只剩一个汉字；
+* ``page-near-blank``（info）：正文墨迹近乎空白的一页（页眉、页码，以及 ``.lof``／
+  ``.lot`` 里载有图表的页都不计）；
 * ``figure-low-resolution``（info／warning）：插图的有效分辨率过低；插图文件缺失是
-  ``figure-file-missing``（error）。
+  ``figure-file-missing``（error）；
+* ``stale-build``（warning）：清单点名的稿件源文件比已排出的 ``.tex`` 新——报告
+  描述的是旧版书，先重新 ``build`` 再信它。
 
 另外几条是"这项检查没做成"的说明，一律 info，不影响退出码：``figure-size-unknown``
 （认不出的图片格式）、``tex-missing``／``pdf-missing``（产物不在，先 ``build``）、
@@ -42,8 +46,9 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Collection, Dict, List, Optional, Sequence, Tuple
 
 from ..paths import relative_to_root
 from . import preamble
@@ -73,9 +78,12 @@ HANGING_PUNCTUATION = "\u2014\u2013"
 LANDSCAPE_PAPER_MARGIN_BP = 36.0
 
 # "近乎空白"的判据：词框面积之和不足页面的这个比例。本书记正经正文页覆盖约 25%，
-# 1% 比它低一个半数量级，既能抓出真正空白的页（0%），也只会顺带把封面页（0.01%）
-# 与篇题页（0.3%—0.8%）这类本来就没多少字的前置页报出来让人自己判断。
-NEAR_BLANK_COVERAGE = 0.01
+# 2% 比它低一个数量级，既能抓出真正空白的页（0%），也能抓住"标题加一两行字"的
+# 单薄页（附录目录 1.44%、各章末页 1.3%—1.7%）。取 1% 时附录目录（第 13 页）
+# 恰好漏在两可之间——那是字号偏小的两行内容，实际排下来墨迹只有 1.44%。阈值偏了，
+# 不是页的问题。代价是也会把带大图的页（正文墨迹 1.7% 上下）一并报出来：本检查
+# 只看得见文字，看不见图（见 :func:`page_near_blank`）。
+NEAR_BLANK_COVERAGE = 0.02
 
 # 插图有效分辨率：低于 120dpi 提醒，低于 72dpi 报警（90dpi 以下肉眼可见发糊）。
 LOW_RESOLUTION_DPI = 120.0
@@ -125,6 +133,18 @@ ORPHAN_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 CITATION_GROUP_RE = re.compile(r"\[[^\[\]]*\]")
 # 表格序号列：行首带一个纯数字段的行是这一行的首行。
 ROW_INDEX_RE = re.compile(r"\d+")
+
+# ---------------------------------------------------------------- 标题孤字行阈值
+
+# "标题孤字行"（``heading-orphan-line``）的判据：一条视觉行的词框高度达到正文的
+# 这个倍数，就认为它排的是标题而不是正文。本书实测（``pdftotext -bbox`` 的词框高）：
+# 章标题 22.00bp、节标题 16.00bp、正文与小节标题 13.95bp。1.1 倍（15.35bp）刚好
+# 把章、节纳进来，把正文与**小节**挡在外面——小节标题与正文同号，本来就分辨不出。
+HEADING_MIN_BODY_RATIO = 1.1
+# 两条标题行"同号"的高度容差（bp）：续行与它上面那一行必须同号才算一次断行。
+HEADING_HEIGHT_TOLERANCE_BP = 0.5
+# 续行与上一行左对齐的容差（bp）：标题是左对齐的，续行必须从同一个左缘起排。
+HEADING_ALIGN_TOLERANCE_BP = 3.0
 
 
 # ---------------------------------------------------------------- 版心几何
@@ -416,14 +436,25 @@ def running_head_collision(
 
 
 def page_near_blank(
-    pages: Sequence[BboxPage], geometry: Optional[Geometry] = None
+    pages: Sequence[BboxPage],
+    geometry: Optional[Geometry] = None,
+    float_pages: Optional[Collection[int]] = None,
 ) -> List[Finding]:
-    """**正文墨迹**覆盖面积不足页面的 :data:`NEAR_BLANK_COVERAGE`（1%）的页。
+    """**正文墨迹**覆盖面积不足页面的 :data:`NEAR_BLANK_COVERAGE`（2%）的页。
 
-    覆盖面积 = 各词框面积之和／页面面积。本书正经正文页的覆盖约 25%，所以 1% 是
+    覆盖面积 = 各词框面积之和／页面面积。本书正经正文页的覆盖约 25%，所以 2% 是
     "几乎没字"而不只是"字少"。已知合法命中：封面页、篇题页、章首页（它们本来就
-    只有标题），以及 ``\\part`` 之后留下的空白 verso——检查的价值在于"没有理由
-    空白的页"也会被一并列出，交给编者自己看。报告页码与词框数。
+    只有标题），附录目录（标题加一行索引，1.44%），以及各章末页（图题加一小段，
+    1.3%—1.7%）。检查的价值在于"没有理由空白的页"也会被一并列出，交给编者自己看。
+    报告页码与词框数。
+
+    **只看得见文字，看不见图**：词框面积里没有插图，所以"整页一幅大图加一行题注"
+    的页（实测 1.7%）也会落进来。``float_pages`` 就是这类"载有浮动图表"的页的
+    页码集合（由调用方从 ``.lof``／``.lot`` 的题注页码取来），命中的页直接跳过：
+    满页大图没有词框并不代表页面空白，把这种页报成空白只会训练人忽略整份清单。
+    注意按**记录的题注页**跳过，不是"靠近图表页就跳"——浮动体正落在正文墨迹本就
+    稀薄的页上，那正是要压制的情形，跳过是故意的。``float_pages`` 默认 ``None``
+    （或空集合）时一个也不排除，与旧行为一致；``.lof``／``.lot`` 缺失也不报错。
 
     只量**版心内的**词框：页眉（版心上边界之上的那条标记）与页码（版心下边界
     之下的那个数字）不算正文墨迹。否则页眉的长短会左右这个数字——实测缩短页眉
@@ -431,8 +462,11 @@ def page_near_blank(
     没动。排除这两条边距里的文字后，这个数只随正文变。没有几何量（缺 ``.log``）
     时退回"整页所有词框"，与旧行为一致。
     """
+    excluded = set(float_pages or ())
     findings: List[Finding] = []
     for page in pages:
+        if page.number in excluded:
+            continue
         words = page.words if geometry is None else _body_words(page, geometry)
         area = page.width * page.height
         covered = sum(
@@ -453,6 +487,23 @@ def page_near_blank(
                 )
             )
     return findings
+
+
+def _float_page_numbers(lof: Optional[str], lot: Optional[str]) -> set:
+    """插图目录／表格目录里题注所在的**印出页码**（阿拉伯数字）集合。
+
+    ``.lof``／``.lot`` 里的 ``\\contentsline {figure}``／``\\contentsline {table}``
+    第三项就是题注所落页；非阿拉伯数字（罗马数字页等）忽略。任一侧缺文件（``None``）
+    或为空时跳过，返回空集合——调用方于是退回"不排除任何页"的旧行为，不报错。
+    """
+    pages: set = set()
+    for text in (lof, lot):
+        if not text:
+            continue
+        for _title, page in parse_contentslines(text):
+            if page.isdigit():
+                pages.add(int(page))
+    return pages
 
 
 def _body_words(page: BboxPage, geometry: Geometry) -> List[Word]:
@@ -586,11 +637,45 @@ def table_orphan_lines(
 
     每处一条发现，location 为 ``page N``，message 带孤字与该行其余各段的文字；
     最多列出 :data:`MAX_TABLE_ORPHAN_LOCATIONS` 处，其余汇总成一条带总数与分页
-    统计的发现。
+    统计的发现。需要**不受报告上限影响的逐页计数**时用
+    :func:`orphan_lines_by_page`——``inspect`` 的交叉核对要拿这个数与视觉发现对账，
+    按发现条数去数会在超过上限时数少。
     """
+    located, per_page = _orphan_line_counts(pages, geometry)
+    total = sum(per_page.values())
+    if total > MAX_TABLE_ORPHAN_LOCATIONS:
+        breakdown = ", ".join(f"{page}×{count}" for page, count in sorted(per_page.items()))
+        located = located[:MAX_TABLE_ORPHAN_LOCATIONS]
+        located.append(
+            Finding(
+                code="table-orphan-line",
+                severity="info",
+                message=(
+                    f"{total} table lines end with a single CJK character; only the first "
+                    f"{MAX_TABLE_ORPHAN_LOCATIONS} are located (per page: {breakdown})"
+                ),
+            )
+        )
+    return located
+
+
+def orphan_lines_by_page(
+    pages: Sequence[BboxPage], geometry: Optional[Geometry] = None
+) -> Dict[int, int]:
+    """每页的表格孤字行计数，**不受** :data:`MAX_TABLE_ORPHAN_LOCATIONS` 影响。
+
+    :func:`table_orphan_lines` 把超出上限的部分折叠成一条汇总，逐页的账目就丢了；
+    交叉核对要的是真实的逐页数（本书 26 处，上限 25），所以这里直接读计数。
+    """
+    return _orphan_line_counts(pages, geometry)[1]
+
+
+def _orphan_line_counts(
+    pages: Sequence[BboxPage], geometry: Optional[Geometry]
+) -> Tuple[List[Finding], Dict[int, int]]:
+    """逐页找出表格孤字行，返回（发现列表, 每页计数）；上限与汇总由调用方处理。"""
     located: List[Finding] = []
-    per_page: dict = {}
-    total = 0
+    per_page: Dict[int, int] = {}
     for page in pages:
         words = page.words if geometry is None else _body_words(page, geometry)
         lines = _visual_lines(words)
@@ -637,7 +722,6 @@ def table_orphan_lines(
                     continue
                 if not any(abs(previous_left - left) <= TABLE_COLUMN_TOLERANCE_BP for previous_left, _, _ in previous):
                     continue
-                total += 1
                 per_page[page.number] = per_page.get(page.number, 0) + 1
                 located.append(
                     Finding(
@@ -652,20 +736,83 @@ def table_orphan_lines(
                     )
                 )
                 break
-    if total > MAX_TABLE_ORPHAN_LOCATIONS:
-        breakdown = ", ".join(f"{page}×{count}" for page, count in sorted(per_page.items()))
-        located = located[:MAX_TABLE_ORPHAN_LOCATIONS]
-        located.append(
-            Finding(
-                code="table-orphan-line",
-                severity="info",
-                message=(
-                    f"{total} table lines end with a single CJK character; only the first "
-                    f"{MAX_TABLE_ORPHAN_LOCATIONS} are located (per page: {breakdown})"
-                ),
+    return located, per_page
+
+
+def heading_orphan_line(
+    pages: Sequence[BboxPage], typography: Typography, geometry: Optional[Geometry] = None
+) -> List[Finding]:
+    r"""标题断行后最后一行只剩一个汉字的行（``heading-orphan-line``，info）。
+
+    中文排版里标题末尾吊一个孤字是硬伤（``……判定性发／现``）。它与
+    :func:`table_orphan_lines` 是同一族瑕疵：LaTeX 不报任何警告，只有看印出来的
+    版面才发现。本检查**量印出来的页**（``pdftotext -bbox`` 的词框），不预测。
+
+    判据（在同一页的视觉行序列上）：
+
+    1. 视觉行按 :func:`_visual_lines` 聚出来（与页眉叠印、表格孤字行同一条判据）；
+       只取版心内的词框，横向页整页跳过（坐标框被转置）。
+    2. 一行的"字高"取该行最高的词框。字高达到正文 em 的
+       :data:`HEADING_MIN_BODY_RATIO` 倍才算标题行——本书章标题 22.00bp、节标题
+       16.00bp 都过线，正文与**小节**标题（同为 13.95bp）不过线。
+    3. 某标题行剥掉段末引用标记组后整行恰为一个汉字（:func:`_orphan_character`），
+       且它**紧挨着的上一行**与之同高（差不超过 :data:`HEADING_HEIGHT_TOLERANCE_BP`）、
+       同左缘（差不超过 :data:`HEADING_ALIGN_TOLERANCE_BP`）——两行构成一次真正的
+       标题断行，孤字是这次断行的尾巴。
+
+    第 3 条是刻意的保守：光看"一行只有一个大字"会把插图里的大字、居中的封面字
+    也算进来；"上一行同高同左缘"只认页边起排的左右标题的续行。
+
+    **看不见什么**（不是缺陷，是这条检查量不到）：
+
+    * **小节标题**（``subsection``）与正文同为 14pt，词框高度一模一样，分辨不出——
+      它断行留孤字时本检查不报；
+    * 居中排版的标题（篇题页、封面）断行留孤字时，续行不与上一行同左缘，不报；
+    * 横向页整页跳过；页眉与页码落在版心外的边距里，本来就不参与；
+    * 孤字限汉字：末尾吊一个拉丁字母不报（本书没有这种情形）。
+    """
+    threshold = body_em_bp(typography) * HEADING_MIN_BODY_RATIO
+    findings: List[Finding] = []
+    for page in pages:
+        if _coordinates_rotated(page):
+            continue
+        words = page.words if geometry is None else _body_words(page, geometry)
+        lines = _visual_lines(words)
+        if len(lines) < 2:
+            continue
+        measured = []
+        for line in lines:
+            measured.append(
+                (
+                    min(word.left for word in line),
+                    max(word.bottom - word.top for word in line),
+                    "".join(word.text for word in sorted(line, key=lambda item: item.left)),
+                )
             )
-        )
-    return located
+        for index in range(1, len(measured)):
+            left, height, text = measured[index]
+            if height < threshold:
+                continue
+            orphan = _orphan_character(text)
+            if orphan is None:
+                continue
+            previous_left, previous_height, previous_text = measured[index - 1]
+            if previous_height < threshold or abs(previous_height - height) > HEADING_HEIGHT_TOLERANCE_BP:
+                continue
+            if abs(previous_left - left) > HEADING_ALIGN_TOLERANCE_BP:
+                continue
+            findings.append(
+                Finding(
+                    code="heading-orphan-line",
+                    severity="info",
+                    message=(
+                        f"a heading wraps with a single CJK character {orphan!r} on its last line; "
+                        f"the line above is {_shorten(previous_text)}"
+                    ),
+                    location=f"page {page.number}",
+                )
+            )
+    return findings
 
 
 def _coordinates_rotated(page: BboxPage) -> bool:
@@ -707,6 +854,10 @@ CAPTION_OPT_RE = re.compile(r"\\caption\s*\[[^\]]*\]")
 # 页眉标记：短标题是章／节标题的**截断副本**，同一段引号会再出现一次，扫描引号
 # 方向时先屏蔽，免得把同一对引号数两遍（与 \addcontentsline 同理）。
 HEADING_MARK_RE = re.compile(r"\\(?:chaptermark|sectionmark)\{[^{}]*\}")
+# 结构命令的可选参数（``\chapter[完整题名]{…}``）：页眉标记修不好标题末尾孤字时，
+# tex 发射器会把完整题名放进可选参数、断过行的题名放进强制参数——两者是同一段
+# 文字的副本。与 \caption[...] 同理，先屏蔽。
+HEADING_OPT_RE = re.compile(r"\\(?:chapter|section)\s*\[[^\]]*\]")
 MARKDOWN_TARGET_RE = re.compile(r"\]\([^)\n]*\)")
 
 
@@ -721,9 +872,11 @@ def mask_tex(text: str, keep_markdown_links: bool = False) -> str:
     屏蔽清单：导言区（``\\begin{document}`` 之前的一切）、``lstlisting`` 环境、
     ``\\includegraphics``、行内公式 ``$...$``、``\\texttt``/``\\url``/``\\href``、
     ``\\label``/``\\ref``/``\\cite`` 的键、``\\addcontentsline{...}{...}{...}``、
-    ``\\caption[...]`` 的可选参数、``\\chaptermark{...}``/``\\sectionmark{...}``。
-    最后三项是**同一段文字的副本**（目录条目、图目录的短题注、页眉里的短标题都
-    会在正文里再出现一次），扫描引号方向时留着它们只会把同一对引号数两遍。
+    ``\\caption[...]`` 的可选参数、``\\chapter[...]``/``\\section[...]`` 的可选参数、
+    ``\\chaptermark{...}``/``\\sectionmark{...}``。
+    最后四项是**同一段文字的副本**（目录条目、图目录的短题注、章／节标题的完整
+    题名、页眉里的短标题都会在正文里再出现一次），扫描引号方向时留着它们只会把
+    同一对引号数两遍。
 
     ``keep_markdown_links`` 为真时保留 ``](...)`` 链接目标——查残留 markdown 语法
     时那正是要找的东西；其余检查用默认值，免得链接标题里的 ASCII 引号被当成
@@ -740,6 +893,7 @@ def mask_tex(text: str, keep_markdown_links: bool = False) -> str:
         LABEL_RE,
         ADDCONTENTSLINE_RE,
         CAPTION_OPT_RE,
+        HEADING_OPT_RE,
         HEADING_MARK_RE,
     ):
         masked = pattern.sub(lambda m: blank(m.group()), masked)
@@ -1221,6 +1375,66 @@ def figure_resolution(
     return findings
 
 
+# ---------------------------------------------------------------- 构建新鲜度
+
+
+def format_mtime(path: Path) -> str:
+    """文件的修改时间，本地时区、精确到秒；读不到时给 ``?``。
+
+    报告里给的是**人读的时刻**，不是时间戳：读者要判断的是"我 21:20 改的稿是不是
+    在 21:08 排的版里"，秒级时间戳没法一眼比。
+    """
+    try:
+        stamp = path.stat().st_mtime
+    except OSError:
+        return "?"
+    return datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def stale_build(manifest: BookManifest, plan: BuildPlan) -> List[Finding]:
+    """稿件源文件比已排出的 ``.tex`` 新时报警（``stale-build``，warning）。
+
+    比对的是清单点名的每一个稿件（``volumes[].sources[].file``）与文献库
+    （``bibliography.file``）的 mtime 与产物 ``.tex`` 的 mtime。只要有一个源文件
+    更新，整份报告就是在描述一本已经不再存在的书——``check --deep`` 与 ``inspect``
+    读的都是**上一次**成书的产物，改了稿不重编，两道检查都会给出"干净"的假结论。
+    每个更新的文件一条发现，消息给出源文件与产物各自的时刻，让人一眼看出差多少。
+
+    ``.tex`` 不在时不报：那是 ``tex-missing`` 的事，先 ``build`` 才有新鲜度可谈。
+    源文件缺失（清单载入时已校验过存在性，这里是防御）跳过，不算"更新"。
+    """
+    if not plan.tex.is_file():
+        return []
+    try:
+        build_stamp = plan.tex.stat().st_mtime
+    except OSError:
+        return []
+    sources = [source.path for volume in manifest.volumes for source in volume.sources]
+    if manifest.bibliography is not None:
+        sources.append(manifest.bibliography)
+    findings: List[Finding] = []
+    for source in sources:
+        try:
+            source_stamp = source.stat().st_mtime
+        except OSError:
+            continue
+        if source_stamp <= build_stamp:
+            continue
+        findings.append(
+            Finding(
+                code="stale-build",
+                severity="warning",
+                message=(
+                    f"manuscript source is newer than the emitted .tex "
+                    f"(source {format_mtime(source)}, build {format_mtime(plan.tex)}); "
+                    "rebuild before trusting this report"
+                ),
+                location=relative_to_root(source, plan.project_root),
+            )
+        )
+    return findings
+
+
 # ---------------------------------------------------------------- 汇总
 
 
@@ -1233,6 +1447,8 @@ def run_checks(manifest: BookManifest, plan: BuildPlan) -> List[Finding]:
     ``info`` 发现，页级检查跳过，不抛异常、不影响退出码。
     """
     findings: List[Finding] = []
+    # 新鲜度先报：后面的每一条都在描述 .tex 所代表的那一版书，源文件更新过就不作数。
+    findings.extend(stale_build(manifest, plan))
     geometry = parse_geometry(_read_text(plan.log) or "")
     tex_text = _read_text(plan.tex)
     if tex_text is None:
@@ -1260,12 +1476,19 @@ def run_checks(manifest: BookManifest, plan: BuildPlan) -> List[Finding]:
         graphics_root = plan.project_root / relative_to_root(manifest.source_root, plan.project_root)
         findings.extend(figure_resolution(tex_text, graphics_root, geometry))
 
-    findings.extend(_page_checks(plan, geometry, body_em_bp(manifest.typography)))
+    findings.extend(
+        _page_checks(plan, geometry, manifest.typography, body_em_bp(manifest.typography))
+    )
     return findings
 
 
-def _page_checks(plan: BuildPlan, geometry: Optional[Geometry], em_bp: float) -> List[Finding]:
-    """页级检查（越界、页眉叠印、表格孤字行、近乎空白）；poppler 或几何量缺席时降级成一条 info。"""
+def _page_checks(
+    plan: BuildPlan,
+    geometry: Optional[Geometry],
+    typography: Typography,
+    em_bp: float,
+) -> List[Finding]:
+    """页级检查（越界、页眉叠印、表格孤字行、标题孤字行、近乎空白）；poppler 或几何量缺席时降级成一条 info。"""
     if not plan.pdf.is_file():
         return [
             Finding(
@@ -1299,7 +1522,9 @@ def _page_checks(plan: BuildPlan, geometry: Optional[Geometry], em_bp: float) ->
         findings.extend(text_out_of_block(pages, geometry, em_bp))
     findings.extend(running_head_collision(pages, geometry))
     findings.extend(table_orphan_lines(pages, geometry))
-    findings.extend(page_near_blank(pages, geometry))
+    findings.extend(heading_orphan_line(pages, typography, geometry))
+    float_pages = _float_page_numbers(_read_text(plan.lof), _read_text(plan.lot))
+    findings.extend(page_near_blank(pages, geometry, float_pages))
     return findings
 
 

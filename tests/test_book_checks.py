@@ -7,6 +7,8 @@
 后面是几何换算与插图分辨率的算术单测——纯函数，连微型书都不用拼。
 """
 
+import os
+
 import pytest
 
 from book_fixtures import MANIFEST, ONE_MD, ONE_PIXEL_PNG, tiny_book
@@ -228,6 +230,18 @@ def test_mask_tex_blanks_the_heading_marks():
     assert "正文“引用”结束。" in masked
 
 
+def test_mask_tex_blanks_the_heading_optional_argument():
+    """``\\chapter[完整题名]{断了行的题名}`` 的可选参数是同一段文字的副本。"""
+    text = "\\chapter[完整题名]{完整题名}\n\\section[短题]{短题}\n正文“引用”结束。\n"
+
+    masked = checks.mask_tex(text)
+
+    assert masked.count("完整题名") == 1  # 可选参数被抹掉，只剩强制参数那一份
+    assert masked.count("短题") == 1
+    assert len(masked) == len(text)
+    assert masked.count("\n") == text.count("\n")
+
+
 def test_quote_direction_accepts_a_title_repeated_by_addcontentsline():
     """标题在 ``\\chapter*`` 与 ``\\addcontentsline`` 里各出现一次，仍是合法交替。"""
     text = "\\chapter*{“凡例”}\n\\addcontentsline{toc}{chapter}{“凡例”}\n正文“引用”结束。\n"
@@ -412,11 +426,12 @@ def test_a_full_text_page_is_not_reported():
 def test_page_near_blank_measures_body_ink_only():
     """页眉与页码落在版心外的边距里，不算正文墨迹——缩页眉不会挪动这个数字。
 
-    全页墨迹 5500bp²（1.10%），只算正文是 4000bp²（0.80%）：旧口径不报、新口径报。
+    全页墨迹 11600bp²（2.31%），只算正文是 4000bp²（0.80%）：整页口径不报、
+    正文口径报。页眉词框排得再长也压不动这个数。
     """
     xml = (
         '<page width="595.280000" height="841.890000">'
-        '<word xMin="72.000000" yMin="40.000000" xMax="172.000000" yMax="54.000000">第一章</word>'
+        '<word xMin="72.000000" yMin="40.000000" xMax="572.000000" yMax="55.000000">页眉标记很长</word>'
         '<word xMin="292.000000" yMin="792.000000" xMax="302.000000" yMax="802.000000">1</word>'
         '<word xMin="72.000000" yMin="400.000000" xMax="472.000000" yMax="410.000000">正文一行</word>'
         "</page>"
@@ -428,6 +443,44 @@ def test_page_near_blank_measures_body_ink_only():
     assert [item.code for item in found] == ["page-near-blank"]
     assert "1 word box(es)" in found[0].message
     assert "0.80% of the page covered" in found[0].message
+
+
+def test_a_page_with_title_and_one_line_is_reported_at_two_percent():
+    """附录目录那类"标题加一行字"的页：1.44% 覆盖——旧阈值 1% 漏掉，新阈值 2% 报出。"""
+    xml = (
+        '<page width="595.280000" height="841.890000">'
+        '<word xMin="72.000000" yMin="152.000000" xMax="160.000000" yMax="174.000000">附录目录</word>'
+        '<word xMin="72.000000" yMin="200.000000" xMax="520.000000" yMax="212.000000">附录 A 科产融合专题</word>'
+        "</page>"
+    )
+    pages = checks.parse_bbox(xml)
+
+    found = checks.page_near_blank(pages, GEOMETRY)
+
+    assert [item.code for item in found] == ["page-near-blank"]
+    assert found[0].severity == "info"
+    assert checks.NEAR_BLANK_COVERAGE == 0.02
+
+
+def test_page_near_blank_skips_recorded_float_pages():
+    """载有浮动图表的页即使正文墨迹稀薄也不报——满页大图没有词框不代表页面空白。"""
+    pages = _page(("72.000000", "400.000000", "100.000000", "410.000000", "图 1"))
+
+    assert [item.code for item in checks.page_near_blank(pages)] == ["page-near-blank"]
+    assert checks.page_near_blank(pages, None, {1}) == []
+    assert [item.code for item in checks.page_near_blank(pages, None, set())] == ["page-near-blank"]
+
+
+def test_float_page_numbers_read_only_arabic_caption_pages():
+    """从 ``.lof``／``.lot`` 的 ``\\contentsline`` 取题注页；非数字页码忽略；缺文件返回空。"""
+    lof = (
+        "\\contentsline {figure}{\\numberline {A-1}{图}}{182}{figure.caption.106}%\n"
+        "\\contentsline {figure}{\\numberline {i}{前图}}{xii}{figure.caption.1}%\n"
+    )
+
+    assert checks._float_page_numbers(lof, None) == {182}
+    assert checks._float_page_numbers(None, None) == set()
+    assert checks._float_page_numbers("", "") == set()
 
 
 # ---------------------------------------------------------------- 表格孤字行
@@ -518,6 +571,79 @@ def test_the_orphan_list_is_capped_with_a_summary(monkeypatch):
     assert findings[-1].location == ""
     assert "2 table lines end with a single CJK character" in findings[-1].message
     assert "per page: 1×2" in findings[-1].message
+
+
+# ---------------------------------------------------------------- 标题孤字行
+
+
+def test_a_heading_that_wraps_to_one_character_is_flagged():
+    """第 57 页那一例：``第七章 / 三十年回顾：代际、成就与判定性发`` 之后吊一个"现"。"""
+    pages = _page(
+        ("72.000000", "152.940000", "161.500000", "174.940000", "第七章"),
+        ("161.500000", "152.940000", "523.260000", "174.940000", "三十年回顾：代际、成就与判定性发"),
+        ("72.000000", "185.940000", "94.000000", "207.940000", "现"),
+        ("72.000000", "300.000000", "523.260000", "313.950000", "正文一行。"),
+    )
+
+    findings = checks.heading_orphan_line(pages, Typography(), GEOMETRY)
+
+    assert [item.code for item in findings] == ["heading-orphan-line"]
+    assert findings[0].severity == "info"
+    assert findings[0].location == "page 1"
+    assert "'现'" in findings[0].message
+    assert "三十年回顾" in findings[0].message
+
+
+def test_a_heading_whose_last_line_has_two_characters_is_left_alone():
+    pages = _page(
+        ("72.000000", "152.940000", "523.260000", "174.940000", "第四章小天体：行星系统的旅行者与家园的"),
+        ("72.000000", "185.940000", "116.000000", "207.940000", "风险"),
+    )
+
+    assert checks.heading_orphan_line(pages, Typography(), GEOMETRY) == []
+
+
+def test_a_body_line_holding_one_character_is_not_a_heading():
+    """正文的字高（13.95bp）不过阈值；哪怕它末尾也吊着一个字。"""
+    pages = _page(
+        ("72.000000", "152.940000", "523.260000", "166.890000", "这是一行普通正文，末尾不能只有一个字。"),
+        ("72.000000", "174.740000", "86.700000", "188.690000", "字"),
+    )
+
+    assert checks.heading_orphan_line(pages, Typography(), GEOMETRY) == []
+
+
+def test_a_subsection_heading_is_out_of_reach():
+    """小节标题与正文同为 14pt（词框 13.95bp），本检查分辨不出——这是它的盲区。"""
+    pages = _page(
+        ("72.000000", "152.940000", "523.260000", "166.890000", "3.1.1　三种驱动机制的制度形态甲"),
+        ("72.000000", "174.740000", "86.700000", "188.690000", "乙"),
+    )
+
+    assert checks.heading_orphan_line(pages, Typography(), GEOMETRY) == []
+
+
+def test_a_centred_heading_wrapping_to_one_character_is_not_matched():
+    """封面、篇题页是居中的：续行不与上一行同左缘，这条检查刻意不认。"""
+    pages = _page(
+        ("200.000000", "152.940000", "400.000000", "174.940000", "行星探测三十年文献综述"),
+        ("290.000000", "185.940000", "312.000000", "207.940000", "述"),
+    )
+
+    assert checks.heading_orphan_line(pages, Typography(), GEOMETRY) == []
+
+
+def test_the_heading_height_threshold_follows_the_manifest_font_size():
+    """阈值是正文 em 的 1.1 倍，不是写死的 15.35bp——正文字号变了它跟着变。"""
+    pages = _page(
+        ("72.000000", "152.940000", "523.260000", "166.890000", "正文一行结尾"),
+        ("72.000000", "174.740000", "86.700000", "188.690000", "字"),
+    )
+
+    # 五号（10.5pt）时正文 em ≈ 10.46bp，阈值 ≈ 11.5bp：13.95bp 的"字号"于是过线
+    findings = checks.heading_orphan_line(pages, Typography(body_font_size="5"), GEOMETRY)
+
+    assert [item.code for item in findings] == ["heading-orphan-line"]
 
 
 # ---------------------------------------------------------------- 插图分辨率
@@ -685,3 +811,87 @@ def test_the_page_checks_degrade_when_pdftotext_is_missing(tmp_path, monkeypatch
     assert unavailable[0].severity == "info"
     assert "pdftotext" in unavailable[0].message
     assert "text-out-of-block" not in _codes(findings)
+
+
+# ---------------------------------------------------------------- 构建新鲜度
+
+
+def _make_newer(path, reference, seconds=10.0):
+    """把 ``path`` 的 mtime 挪到 ``reference`` 之后（不碰内容）。"""
+    stamp = reference.stat().st_mtime + seconds
+    os.utime(path, (stamp, stamp))
+
+
+def test_stale_build_fires_when_a_source_is_newer_than_the_tex(tmp_path):
+    """改了稿没重编：报告描述的是上一版书，唯一该做的是先 build。"""
+    _, builder = _deep(tmp_path)
+    source = builder.manifest.source_root / "one.md"
+    _make_newer(source, builder.plan.tex)
+
+    findings = checks.stale_build(builder.manifest, builder.plan)
+
+    assert [item.code for item in findings] == ["stale-build"]
+    assert findings[0].severity == "warning"
+    assert findings[0].location == "sources/one.md"
+    assert "newer than the emitted .tex" in findings[0].message
+    assert "rebuild before trusting this report" in findings[0].message
+    # 两个时刻都在消息里：源文件自己的与产物 .tex 的
+    assert checks.format_mtime(source) in findings[0].message
+    assert checks.format_mtime(builder.plan.tex) in findings[0].message
+
+
+def test_stale_build_reports_every_newer_source(tmp_path):
+    """两个源文件都比 .tex 新就报两条，各自带自己的相对路径。"""
+    _, builder = _deep(tmp_path)
+    _make_newer(builder.manifest.source_root / "one.md", builder.plan.tex)
+    _make_newer(builder.manifest.bibliography, builder.plan.tex)
+
+    findings = checks.stale_build(builder.manifest, builder.plan)
+
+    assert sorted(item.location for item in findings) == ["sources/one.md", "sources/refs.md"]
+    assert {item.severity for item in findings} == {"warning"}
+
+
+def test_stale_build_is_silent_when_every_source_is_older(tmp_path):
+    """刚 build 完，源文件都旧于 .tex——当前树上必须一条都不报。"""
+    _, builder = _deep(tmp_path)
+
+    assert checks.stale_build(builder.manifest, builder.plan) == []
+
+
+def test_stale_build_says_nothing_without_a_tex(tmp_path):
+    """产物不在是 tex-missing 的事，新鲜度不越俎代庖。"""
+    _, builder = _deep(tmp_path)
+    builder.plan.tex.unlink()
+
+    assert checks.stale_build(builder.manifest, builder.plan) == []
+
+
+def test_format_mtime_reads_a_time_and_survives_a_missing_file(tmp_path):
+    path = tmp_path / "a.md"
+    path.write_text("x", encoding="utf-8")
+
+    assert len(checks.format_mtime(path)) == 19  # YYYY-MM-DD HH:MM:SS
+    assert checks.format_mtime(tmp_path / "nope.md") == "?"
+
+
+def test_deep_checks_report_stale_build_first(tmp_path):
+    """run_checks 把新鲜度排在第一位：后面每条都在描述 .tex 代表的那一版书。"""
+    _, builder = _deep(tmp_path)
+    _make_newer(builder.manifest.source_root / "two.md", builder.plan.tex)
+
+    findings = checks.run_checks(builder.manifest, builder.plan)
+
+    assert _codes(findings)[0] == "stale-build"
+
+
+def test_plain_check_does_not_mention_a_stale_build(tmp_path, capsys):
+    """``stale-build`` 只在 --deep 里：普通 check 的输出保持逐字不变。"""
+    path = tiny_book(tmp_path)
+    main(["build", str(path), "--tex-only"])
+    _make_newer(tmp_path / "sources" / "one.md", tmp_path / "_primer" / "book" / "tiny.tex")
+
+    assert main(["check", str(path)]) == 0
+
+    assert "stale-build" not in capsys.readouterr().out
+
