@@ -151,7 +151,10 @@ activemq-data/
 *.sage.py
 
 # Environments
-.env
+# 只挡 `.env` 这一个名字会漏掉 .env.local / .env.bak / .env.save 之类；
+# 密钥就在这里，按前缀全挡，另留一个可提交的模板名。
+.env*
+!.env.example
 .envrc
 .venv
 env/
