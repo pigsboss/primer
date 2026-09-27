@@ -28,7 +28,8 @@ from .base import (
     STRATEGY_CONFIGS,
 )
 
-__version__ = "0.1.0"
+# 版本号统一由顶层包提供，避免多处字面量漂移
+from .. import __version__
 __all__ = [
     'ProcessingStrategy',
     'FileType',

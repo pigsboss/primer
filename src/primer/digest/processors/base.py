@@ -14,8 +14,7 @@ from datetime import datetime
 from abc import ABC, abstractmethod
 
 # 导入基础模块
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from base import (
+from ..base import (
     ProcessingStrategy,
     FileType,
     FileMetadata,

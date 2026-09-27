@@ -1223,5 +1223,11 @@ Operation Modes:
         return saved_path
 
 
+def cli() -> int:
+    """控制台脚本入口：``main`` 的返回值是输出路径而非状态码，这里统一返回 0。"""
+    main()
+    return 0
+
+
 if __name__ == "__main__":
     main()
