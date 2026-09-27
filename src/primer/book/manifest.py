@@ -227,6 +227,12 @@ class Typography:
     ``normalize_quotes`` 为真时（默认）在装配阶段把正文里的 ASCII 直引号配成中文
     弯引号——引号方向是形式，由排版系统决定，源文件不改；关掉它可用命令行的
     ``--no-normalize-quotes``。
+
+    ``cjk_fake_bold`` 是 CJK 主、等宽两族的合成粗体权重（``AutoFakeBold``）：
+    宋体没有可用的粗体字面，取 0 会让正文的 ``\\textbf`` 悄悄退回常规字重，所以
+    默认保留 2.5 来"假粗"。``cjk_sans_fake_bold`` 只作用于 CJK 无衬线（标题）族，
+    空值表示沿用 ``cjk_fake_bold``。装了真实半粗字面（如冬青黑体 W6）的族要在其上
+    再叠合成粗体就是双重加粗、观感发糊，这时把该族单独设为 ``"0"``。
     """
 
     paper: str = "a4paper"
@@ -236,6 +242,7 @@ class Typography:
     par_skip: str = "0.2em"
     caption_skip: str = "6pt"
     cjk_fake_bold: str = "2.5"
+    cjk_sans_fake_bold: str = ""
     cjk_fake_slant: str = "0.15"
     toc_name: str = "目录"
     figure_list_name: str = "插图目录"

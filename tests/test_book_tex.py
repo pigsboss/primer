@@ -476,3 +476,19 @@ def test_preamble_accepts_point_sizes_and_zihao_codes():
     assert "\\fontsize{10.5pt}{13.125pt}" in preamble.render_size_ladder("5")
     assert preamble.body_points("12") == 12
     assert preamble.body_points("-4") == 12
+
+
+def test_preamble_sans_fake_bold_is_independent_of_main_and_mono():
+    rendered = preamble.render_preamble(Fonts(), Typography(cjk_sans_fake_bold="0"), "成果文件/")
+
+    assert r"\setCJKmainfont[AutoFakeBold=2.5,AutoFakeSlant=0.15]{Songti SC}" in rendered
+    assert r"\setCJKsansfont[AutoFakeBold=0]{Heiti SC}" in rendered
+    assert r"\setCJKmonofont[AutoFakeBold=2.5]{Songti SC}" in rendered
+
+
+def test_preamble_sans_fake_bold_falls_back_to_the_shared_knob():
+    rendered = preamble.render_preamble(Fonts(), Typography(cjk_fake_bold="3"), "成果文件/")
+
+    assert r"\setCJKmainfont[AutoFakeBold=3,AutoFakeSlant=0.15]{Songti SC}" in rendered
+    assert r"\setCJKsansfont[AutoFakeBold=3]{Heiti SC}" in rendered
+    assert r"\setCJKmonofont[AutoFakeBold=3]{Songti SC}" in rendered

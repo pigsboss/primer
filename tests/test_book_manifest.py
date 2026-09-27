@@ -197,6 +197,17 @@ def test_typography_rejects_unknown_keys(tmp_path):
         load_manifest(path)
 
 
+def test_cjk_sans_fake_bold_defaults_to_empty_and_parses_when_set(tmp_path):
+    """空值表示"跟随 cjk_fake_bold"，由导言区去解析这条回退。"""
+    assert load_manifest(tiny_book(tmp_path)).typography.cjk_sans_fake_bold == ""
+
+    path = tiny_book(
+        tmp_path,
+        MANIFEST.replace('body_font_size: "4"', 'body_font_size: "4"\n  cjk_sans_fake_bold: "0"'),
+    )
+    assert load_manifest(path).typography.cjk_sans_fake_bold == "0"
+
+
 def test_regex_compilation_failure_is_manifest_error(tmp_path):
     path = tiny_book(tmp_path, MANIFEST.replace("^\\*（第[一二三]篇", "^\\*（第["))
 

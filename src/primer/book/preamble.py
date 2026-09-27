@@ -90,6 +90,7 @@ def render_preamble(
     编译时的工作目录即工程根，markdown 里的图片路径相对该根。
     """
     template = TexTemplate(template_path().read_text(encoding="utf-8"))
+    cjk_sans_fake_bold = typography.cjk_sans_fake_bold or typography.cjk_fake_bold
     return template.substitute(
         paper=typography.paper,
         margin=typography.margin,
@@ -100,6 +101,7 @@ def render_preamble(
         cjk_sans_font=fonts.cjk_sans,
         cjk_mono_font=fonts.cjk_mono,
         cjk_fake_bold=typography.cjk_fake_bold,
+        cjk_sans_fake_bold=cjk_sans_fake_bold,
         cjk_fake_slant=typography.cjk_fake_slant,
         graphics_path=graphics_path,
         caption_skip=typography.caption_skip,
