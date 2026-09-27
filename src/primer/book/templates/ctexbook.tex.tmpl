@@ -1,0 +1,133 @@
+% !TeX program = xelatex
+% 本文件由 primer-book 生成，请勿手工维护；改清单后重新构建。
+\documentclass[UTF8,fontset=none]{ctexbook}
+
+\usepackage[@paper,margin=@margin]{geometry}
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{xltabular}
+\usepackage{booktabs}
+\usepackage{adjustbox}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{pdflscape}
+\usepackage{fancyhdr}
+\usepackage{tocloft}
+\usepackage{caption}
+\usepackage{newunicodechar}
+\usepackage[hidelinks,unicode]{hyperref}
+
+% ---------------------------------------------------------------- 字体
+% 正文用衬线（宋体），各级标题用黑体（sans）；fontset=none，字体名由清单给出。
+\setmainfont{@main_font}
+\setsansfont{@sans_font}
+\setmonofont{@mono_font}
+\setCJKmainfont[AutoFakeBold=@cjk_fake_bold,AutoFakeSlant=@cjk_fake_slant]{@cjk_main_font}
+\setCJKsansfont[AutoFakeBold=@cjk_fake_bold]{@cjk_sans_font}
+\setCJKmonofont[AutoFakeBold=@cjk_fake_bold]{@cjk_mono_font}
+
+% ---------------------------------------------------------------- 特殊字符
+\newunicodechar{⁻}{\textsuperscript{-}}
+\newunicodechar{⁰}{\textsuperscript{0}}\newunicodechar{¹}{\textsuperscript{1}}
+\newunicodechar{²}{\textsuperscript{2}}\newunicodechar{³}{\textsuperscript{3}}
+\newunicodechar{⁴}{\textsuperscript{4}}\newunicodechar{⁵}{\textsuperscript{5}}
+\newunicodechar{⁶}{\textsuperscript{6}}\newunicodechar{⁷}{\textsuperscript{7}}
+\newunicodechar{⁸}{\textsuperscript{8}}\newunicodechar{⁹}{\textsuperscript{9}}
+\newunicodechar{₀}{\textsubscript{0}}\newunicodechar{₁}{\textsubscript{1}}
+\newunicodechar{₂}{\textsubscript{2}}\newunicodechar{₃}{\textsubscript{3}}
+\newunicodechar{₄}{\textsubscript{4}}\newunicodechar{₅}{\textsubscript{5}}
+\newunicodechar{₆}{\textsubscript{6}}\newunicodechar{₇}{\textsubscript{7}}
+\newunicodechar{₈}{\textsubscript{8}}\newunicodechar{₉}{\textsubscript{9}}
+\newunicodechar{⊕}{$\oplus$}
+\newunicodechar{℃}{$^{\circ}$C}
+\newunicodechar{①}{\textcircled{\scriptsize 1}}\newunicodechar{②}{\textcircled{\scriptsize 2}}
+\newunicodechar{③}{\textcircled{\scriptsize 3}}\newunicodechar{④}{\textcircled{\scriptsize 4}}
+\newunicodechar{⑤}{\textcircled{\scriptsize 5}}\newunicodechar{⑥}{\textcircled{\scriptsize 6}}
+\newunicodechar{⑦}{\textcircled{\scriptsize 7}}\newunicodechar{⑧}{\textcircled{\scriptsize 8}}
+\newunicodechar{⑨}{\textcircled{\scriptsize 9}}\newunicodechar{⑩}{\textcircled{\scriptsize 10}}
+
+% ---------------------------------------------------------------- 版面
+\graphicspath{{@graphics_path}}
+
+% 篇、章、节、小节：标题一律黑体，编号由 LaTeX 自动给出（连续章号）。
+\ctexset{
+  part/name = {第,篇},
+  part/number = \chinese{part},
+  part/format = \sffamily\bfseries\zihao{1},
+  part/nameformat = \sffamily\bfseries,
+  part/titleformat = \sffamily\bfseries,
+  chapter/format = \sffamily\bfseries\zihao{2},
+  chapter/nameformat = \sffamily\bfseries,
+  chapter/titleformat = \sffamily\bfseries,
+  section/format = \sffamily\bfseries\zihao{3},
+  section/nameformat = \sffamily\bfseries,
+  section/titleformat = \sffamily\bfseries,
+  subsection/format = \sffamily\bfseries\zihao{4},
+  subsection/nameformat = \sffamily\bfseries,
+  subsection/titleformat = \sffamily\bfseries,
+  subsubsection/format = \sffamily\bfseries\zihao{-4},
+  subsubsection/nameformat = \sffamily\bfseries,
+  subsubsection/titleformat = \sffamily\bfseries,
+  figurename = 图,
+  tablename = 表,
+}
+
+% 小节以下也编号：附录篇里“#### ”要成为 A.3.3.1 这样的一档。
+\setcounter{secnumdepth}{3}
+
+% 图、表按章编号，取“章-序”的写法（图 10-1）。
+\counterwithin{figure}{chapter}
+\counterwithin{table}{chapter}
+\renewcommand{\thefigure}{\thechapter-\arabic{figure}}
+\renewcommand{\thetable}{\thechapter-\arabic{table}}
+
+\captionsetup{font={small},skip=@caption_skip,labelsep=quad}
+
+% 表格列宽：X 列按权重分配（权重之和等于列数），宽度自动扣掉列间距。
+\newcolumntype{Y}[1]{>{\raggedright\arraybackslash\hsize=#1\hsize}X}
+\setlength{\emergencystretch}{3em}
+\tolerance=2000
+\setlength{\headheight}{17pt}
+
+\linespread{@line_spread}\selectfont
+\setlength{\parskip}{@par_skip}
+@size_ladder
+
+\renewcommand{\contentsname}{@toc_name}
+\renewcommand{\listfigurename}{@figure_list_name}
+\renewcommand{\listtablename}{@table_list_name}
+\setcounter{tocdepth}{@toc_depth}
+
+% ---------------------------------------------------------------- 页眉页脚
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE,RO]{\sffamily\small\leftmark}
+\fancyhead[LO,RE]{\sffamily\small\rightmark}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+% 页眉里节的短标记用：\rightmark 取本页第一条标记，而 \section 自己会先发一条
+% 完整题名的标记，所以发射器在那条 \section 前把 \sectionmark 临时换成它，排完
+% 正文再补发短标记。放在导言区定义，正文里就可以直接 \let 使用。
+\newcommand{\primerheadgobble}[1]{}
+\fancypagestyle{plain}{%
+  \fancyhf{}%
+  \fancyfoot[C]{\thepage}%
+  \renewcommand{\headrulewidth}{0pt}%
+}
+
+% ---------------------------------------------------------------- 代码
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  breakatwhitespace=false,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  frame=single,
+  framerule=0.3pt,
+  rulecolor=\color{gray},
+  postbreak=\mbox{\textcolor{gray}{$\hookrightarrow$}\space},
+  aboveskip=0.8em,
+  belowskip=0.8em,
+}
