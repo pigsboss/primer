@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "primer"
+description = "Prompt-Ready Interface for Multimodal Extraction and Representation (S2AI)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "PyYAML>=6.0",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+]
+
+[project.scripts]
+primer-digest = "primer.digest.__main__:cli"
+primer-literature = "primer.literature.__main__:main"
+primer-book = "primer.book.__main__:main"
+primer-references = "primer.references.__main__:main"
+primer-claims = "primer.claims.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "primer.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["primer*"]
+
+[tool.setuptools.package-data]
+"primer.digest" = ["rules_examples/*.yml"]
+"primer.book" = ["templates/*.tmpl"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
