@@ -23,6 +23,8 @@ primer-literature = "primer.literature.__main__:main"
 primer-book = "primer.book.__main__:main"
 primer-references = "primer.references.__main__:main"
 primer-claims = "primer.claims.__main__:main"
+primer-slides = "primer.slides.__main__:main"
+primer-scene = "primer.scene.__main__:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "primer.__version__" }

@@ -45,7 +45,7 @@ PathLike = Union[str, "os.PathLike[str]"]
 
 # 唯一的产物根目录名，以及它下面允许的功能子目录。
 OUTPUT_DIRNAME = "_primer"
-FEATURES = ("literature", "references", "book", "claims")
+FEATURES = ("literature", "references", "book", "claims", "slides", "scene")
 
 
 def normalize_project_root(value: PathLike) -> Path:
