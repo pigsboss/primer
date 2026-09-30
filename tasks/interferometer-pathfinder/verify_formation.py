@@ -3,19 +3,22 @@
 
 用法：blender --background --python verify_formation.py
 输出：out/formation/verify_log.txt 与 out/formation/formation_report.json（E12）。
-判据逐条对应《阶段四_验收清单》v1.2 E1–E17（规格 v1.5），不自增删；每条判据的证据都从
+判据逐条对应《阶段四_验收清单》v1.3 E1–E19（规格 v1.7），不自增删；每条判据的证据都从
 **场景实测**取，不采信建模脚本的自报值（E14 的包络增量、E17 的随机量都由验收侧独立复算）。
 版本敏感 API 设后回读（规范 §三）；全部几何判定用网格顶点真实包围盒；读取失败即 FAIL；
 main() 异常打印 traceback。
 
-三处"按字面会误判、已写明读法"的地方（交付说明同步回报，不擅自改判据文字）：
+四处"按字面会误判、已写明读法"的地方（交付说明同步回报，不擅自改判据文字）：
   * E13 "翼板厚度 0.02–0.04 m"——v1.5 §二.8 要求帆板沿法向加 crown（0.005–0.02 m），法向
     **包围盒**会变成 0.03+crown（最大 0.05）。故按**逐展向切片的局部厚度**量（每片仍是
     0.03），并把法向包围盒一并打印。
   * E14 "D11 仍通过"——D11 是阶段三装配态判据；本阶段以"包络常数（1.825/4.610）不被撑破"
     承接其连续性，E10 直接复用本清单 E10 的结果。
   * E15 "非 Wave/Grid 周期纹理"——判据文字挂在 MAT_bus* 的 bump 上（§四 MLI 行），故
-    周期纹理黑名单只查 MLI 材质；翼板板格的去规则化由域扭曲＋逐板相位实现（E17 核）。
+    周期黑名单只查 MLI 材质；翼板板格的去规则化由域扭曲＋逐板相位实现（E17 核）。
+  * E15 "绗缝视觉宽度 ≤0.01 m"——程序化针脚的"视觉宽度"无法逐像素测量，按 report 台账里的
+    **解析估计式**（宽度 ≈ 阈值带宽 / |∇噪声|，|∇|≈2π·scale·0.25）核验，方法写在交付说明；
+    同时核针脚 bump 贡献 ≤ 褶皱 bump 的 1/3。
 """
 import json
 import math
@@ -39,8 +42,13 @@ REPORT = os.path.join(OUT, "formation_report.json")
 
 V13_MARKS = ("_RCS_", "_ANT_", "_HINGE_", "_EDGE_", "_BAFFLE_", "_TURNTABLE_", "_ROD_")
 ENV_R, ENV_H = 1.825, 4.610        # 阶段三 D11 的包络常数：本阶段承接其连续性
-BAY_DIM = (1.24, 3.60, 0.50)       # §二.3：合束器本体＝平台舱 bay
-BAY_TOL = 0.02                     # 容差：含 v1.5 §二.8 的大平面微起伏（≤5 mm）
+# §二.3 v1.7：合束器＝阶段二单体整机；**场景中不得存在 bay 类对象**（名＋网格包围盒双重判定）
+CMB_PARTS = ("bus", "module", "recv_01", "recv_02", "aux_01",
+             "panel_X1", "panel_X2", "panel_-X1", "panel_-X2", "tank_01", "tank_02")
+BAY_DIM, BAY_TOL = (1.24, 3.60, 0.50), 0.05     # bay 类对象的特征尺寸与容差
+MLI_GOLD_F0 = (1.00, 0.78, 0.35)                # §四：金色 MLI 的 F0（±0.02）
+WRINKLE_RANGE = (0.01, 0.05)                    # §二.8 介观尺度红线（m）
+PERIODIC = ("TEX_WAVE", "TEX_CHECKER", "TEX_MAGIC", "TEX_GRID", "TEX_VORONOI")  # 本清单自带禁令
 
 results = []
 
@@ -127,6 +135,24 @@ def mat_roughness(m):
         if n.type == "BSDF_PRINCIPLED":
             return n.inputs["Roughness"].default_value
     return None
+
+
+def mat_socket(m, name):
+    """读 Principled 某输入插槽的默认值：颜色返回前三分量，数值返回 float，缺失返回 None。"""
+    if not m or not m.use_nodes:
+        return None
+    for n in m.node_tree.nodes:
+        if n.type == "BSDF_PRINCIPLED" and name in n.inputs:
+            v = n.inputs[name].default_value
+            try:
+                return tuple(v)[:3] if len(v) == 4 else float(v)
+            except TypeError:
+                return float(v)
+    return None
+
+
+def mat_base_color(m):
+    return mat_socket(m, "Base Color")
 
 
 def bump_strengths(m):
@@ -239,10 +265,9 @@ def main():
                                   "BEAM_link_colA", "BEAM_link_colB")}
     col_parts = ("bus", "tube", "panel_X1", "panel_X2", "panel_-X1", "panel_-X2",
                  "window_out", "tank_01", "tank_02")
-    cmb_parts = ("bay", "module", "panel_X1", "panel_X2", "panel_-X1", "panel_-X2",
-                 "tank_01", "tank_02")
+    cmb_parts = CMB_PARTS
     gimbals = {t: [o for o in group_objs(t) if o.name.startswith(t + "_gimbal")] for t in ("colA", "colB")}
-    cmb_body = find("cmb_bay") or find("cmb_bus")
+    cmb_body = find("cmb_bus")
 
     # ---- E1 对象齐备 + 关键尺寸抽检（v1.2：cmb＝bay 本体）----
     miss = [f"{t}_{p}" for t in ("colA", "colB") for p in col_parts if not find(f"{t}_{p}")]
@@ -252,17 +277,27 @@ def main():
     bus_lo, bus_hi = bb([find("colA_bus")])
     bus = [bus_hi[i] - bus_lo[i] for i in range(3)]
     tube = dims([find("colA_tube")])
-    bay_dims = dims([cmb_body]) if cmb_body else [0, 0, 0]
-    bay_ok = all(abs(bay_dims[i] - BAY_DIM[i]) <= BAY_TOL for i in range(3))
-    dim_ok = (1.15 <= max(bus[0], bus[1]) <= 1.30 and 0.85 <= bus[2] <= 0.95
-              and 0.55 <= max(tube[0], tube[1]) <= 0.70
-              and abs(bay_dims[1] - max(bay_dims)) < 1e-6)     # bay 长轴沿 Y（基线）
-    check("E1", "对象齐备：colA/colB 复用单体；cmb＝bay 本体(1.24×3.60×0.50)＋module＋翼＋储箱；"
-                "四束与 EMPTY_LAYOUT 齐备",
-          not miss and gim_ok and bay_ok and dim_ok,
+    mod_dims = dims([find("cmb_module")]) if find("cmb_module") else [0, 0, 0]
+    cmb_ok = (1.15 <= max(bus[0], bus[1]) <= 1.30 and 0.85 <= bus[2] <= 0.95
+              and abs(max(mod_dims[0], mod_dims[1]) - 0.516) <= 0.02
+              and abs(mod_dims[2] - 0.700) <= 0.02)
+    # bay 类对象：名中带 bay，或网格真实包围盒≈1.24×3.60×0.50 的长扁箱（v1.5 的 bay 已作废）
+    bay_named = [o.name for o in bpy.data.objects if "bay" in o.name.lower()]
+    bay_shaped = []
+    for o in bpy.data.objects:
+        if o.type != "MESH":
+            continue
+        d = dims([o])
+        if all(abs(d[i] - BAY_DIM[i]) <= BAY_TOL for i in range(3)):
+            bay_shaped.append((o.name, [round(v, 3) for v in d]))
+    check("E1", "对象齐备：colA/colB 复用阶段一单体；**cmb＝阶段二单体整机**（bus 1.20×1.20×0.90"
+                "＋module Ø0.52×0.70＋recv×2＋aux＋翼×4＋储箱×2）；**场景中不存在 bay 类对象**；四束与"
+                " EMPTY_LAYOUT 齐备",
+          not miss and gim_ok and cmb_ok and not bay_named and not bay_shaped,
           f"缺件={miss or '无'}；gimbal={[len(gimbals[t]) for t in ('colA', 'colB')]}；"
           f"集光器舱{['%.2f' % v for v in bus]}、筒径{max(tube[0], tube[1]):.3f}；"
-          f"bay={['%.3f' % v for v in bay_dims]}（目标 {BAY_DIM}，容差 {BAY_TOL}）")
+          f"合束器舱{['%.2f' % v for v in dims([cmb_body])]}、载荷舱{['%.3f' % v for v in mod_dims]}；"
+          f"bay 类对象：名={bay_named or '无'}／形={bay_shaped or '无'}")
 
     if miss or not layout:
         raise SystemExit("关键对象缺失，终止")
@@ -454,6 +489,9 @@ def main():
                       if m.name.startswith(("MAT_BUS_MLI", "MAT_BAY_MLI")))
     tube_mats = sorted(m.name for m in bpy.data.materials if m.name.startswith("MAT_TUBE_BLACK"))
     rnd = json.loads(layout.get("random_json") or "{}")
+    mlog = json.loads(layout.get("material_json") or "{}")
+    mli_rows = [v for v in mlog.values() if v.get("class") == "金色 MLI"]
+    wrinkle = sorted({f for r in mli_rows for f in r.get("wrinkle_feature_m", [])})
     report = {
         "baseline_real_m": layout.get("baseline_real_m"),
         "baseline_display_m": layout.get("baseline_display_m"),
@@ -466,7 +504,7 @@ def main():
                            "link_strength": mat_emission(beams["BEAM_link_colA"]),
                            "note": "socket 存规格基色；发光色按 F3/F5 实测束色反解"},
         "wing_state_T1": layout.get("wing_state"),
-        "cmb_body_T3": layout.get("cmb_body"),
+        "cmb_body_v17": layout.get("cmb_body"),
         "ports_T2": {"object": "cmb_port_posY / cmb_port_negY",
                      "口径_m": max(dims([find("cmb_port_posY")])[:2]) if find("cmb_port_posY") else None},
         "sun_dir": list(layout.get("sun_dir") or ()),
@@ -478,6 +516,8 @@ def main():
                        "look": scene.view_settings.look},
         "random_seed": layout.get("random_seed"),
         "random_values": rnd,
+        "material_table": mlog,
+        "mli_wrinkle_feature_m": wrinkle,
         "materials_v2": {"bus_MLI": bus_mats, "tube_black": tube_mats,
                          "edge_trim": sorted({m.name for m in bpy.data.materials
                                               if m.name.startswith("MAT_up_alu")})},
@@ -488,11 +528,13 @@ def main():
         json.dump(report, f, ensure_ascii=False, indent=2)
     need = ("baseline_real_m", "baseline_display_m", "beam_d_star_m", "wing_state_T1")
     check("E12", "formation_report.json 记录真实/显示基线、束径、材质、翼态、sun_dir、星场强度、"
-                 "**全部随机种子**",
+                 "**全部随机种子**、**MLI 褶皱特征尺度**",
           all(report.get(k) is not None for k in need) and report["sun_dir"]
           and report["starfield"]["strength"] is not None
-          and report["random_seed"] is not None and bool(report["random_values"]),
-          f"已写 {os.path.relpath(REPORT, HERE)}（随机量 {len(rnd)} 项，种子 {report['random_seed']}）")
+          and report["random_seed"] is not None and bool(report["random_values"])
+          and bool(wrinkle),
+          f"已写 {os.path.relpath(REPORT, HERE)}（随机量 {len(rnd)} 项，种子 {report['random_seed']}；"
+          f"材料台账 {len(mlog)} 行；褶皱尺度 {wrinkle} m）")
 
     # ---- E13 推断默认件齐备 ----
     bad = []
@@ -532,14 +574,27 @@ def main():
           f"本体 y_max={[v13[t]['y_max_m'] for t in v13]}、总高={[v13[t]['envelope_m'][2] for t in v13]}；"
           f"E10={e10_ok}")
 
-    # ---- E15 材质管线（MLI bump 必须是分形噪声，不得周期纹理）----
-    mli = [m for m in bpy.data.materials if m.name.startswith(("MAT_BUS_MLI", "MAT_BAY_MLI"))]
+    # ---- E15 材质管线（v1.3：金色 MLI 物理参数＋厘米级褶皱＋禁周期/分块）----
+    mli = [m for m in bpy.data.materials if m.name.startswith("MAT_BUS_MLI")]
     bump = {m.name: bump_strengths(m) for m in mli}
     det = {m.name: (max(noise_details(m)) if noise_details(m) else 0.0) for m in mli}
     per = {m.name: periodic_nodes(m) for m in mli}
-    bump_ok = bool(mli) and all(v and max(v) > 0 for v in bump.values())
+    met = {m.name: mat_socket(m, "Metallic") for m in mli}
+    f0 = {m.name: mat_base_color(m) for m in mli}
+    rgh = {m.name: mat_socket(m, "Roughness") for m in mli}
+    bump_ok = (bool(mli) and all(v and len(v) >= 1 and max(v) > 0 for v in bump.values())
+               and all(m is not None and abs(m - 1.0) <= 0.01 for m in met.values())
+               and all(c and all(abs(c[i] - MLI_GOLD_F0[i]) <= 0.02 for i in range(3))
+                       for c in f0.values())
+               and all(r is not None and 0.30 <= r <= 0.45 for r in rgh.values()))
     noise_ok = all(d >= 3.0 for d in det.values())
     per_ok = all(not v for v in per.values())
+    scale_ok = bool(wrinkle) and all(WRINKLE_RANGE[0] <= f <= WRINKLE_RANGE[1] for f in wrinkle)
+    st_ok = bool(mli_rows)
+    for r in mli_rows:
+        st_ok = st_ok and r.get("stitch_width_est_m", 9) <= 0.01 \
+            and r.get("stitch_ratio", 9) <= 1.0 / 3 + 1e-6 \
+            and not r.get("banned_nodes_present")
     rough = {m.name: mat_roughness(m) for m in bpy.data.materials if m.name.startswith("MAT_TUBE_BLACK")}
     rough_ok = bool(rough) and all(v is not None and v >= 0.85 for v in rough.values())
     edge_bad = []
@@ -552,11 +607,14 @@ def main():
                 edge_bad.append("%s 无描边" % p.name)
             elif mat_color(hit[0]) == mat_color(p):
                 edge_bad.append("%s 描边同色" % p.name)
-    check("E15", "材质管线：MAT_bus*/MAT_BAY* 的 bump 为**分形噪声**（Detail≥3、无 Wave/Grid 周期纹理）；"
-                 "MAT_tube* roughness ≥0.85；翼缘有描边材质",
-          bump_ok and noise_ok and per_ok and rough_ok and not edge_bad,
-          f"MLI bump={ {k: [round(x, 2) for x in v] for k, v in bump.items()} }；"
-          f"Noise Detail={det}；周期纹理={ {k: v for k, v in per.items() if v} or '无'}；"
+    check("E15", "材质管线：金色 MLI（场景重建）metallic=1、金色 F0≈(1.00,0.78,0.35)、"
+                 "roughness∈[0.3,0.45]；bump 为分形噪声（无 Wave/Grid/Voronoi 分块）；"
+                 "褶皱特征尺度∈[0.01,0.05] m 且记入 report；缝线为细针脚（宽度≤0.01 m、"
+                 "bump≤褶皱 1/3）；MAT_tube* roughness ≥0.85；翼缘有描边材质",
+          bump_ok and noise_ok and per_ok and scale_ok and st_ok and rough_ok and not edge_bad,
+          f"MLI metallic={met}；F0={f0}；roughness={rgh}；bump={ {k: [round(x, 2) for x in v] for k, v in bump.items()} }；"
+          f"Noise Detail={det}；周期/分块节点={ {k: v for k, v in per.items() if v} or '无'}；"
+          f"褶皱尺度={wrinkle} m；针脚={[{'w': r.get('stitch_width_est_m'), 'ratio': r.get('stitch_ratio'), 'jit': r.get('stitch_jitter')} for r in mli_rows]}；"
           f"镜筒 roughness={ {k: round(v, 2) for k, v in rough.items()} }；翼缘异常={edge_bad or '无'}")
 
     # ---- E16 主光（+Z 主导、fill ≤0.2、look 回读）----
@@ -582,7 +640,7 @@ def main():
     crowns = {t: v13[t]["panel_crown_m"] for t in ("colA", "colB", "cmb")}
     crown_ok = all(all(0.005 - 1e-4 <= c <= 0.02 + 1e-4 for c in cs) for cs in crowns.values())
     spread_ok = all((max(cs) - min(cs)) >= 0.002 for cs in crowns.values() if len(cs) > 1)
-    seam = [rnd[k]["seam_jitter"] for k in rnd if k.startswith("mli|") and "seam_jitter" in rnd[k]]
+    seam = [r.get("stitch_jitter") for r in mli_rows if r.get("stitch_jitter") is not None]
     seam_ok = bool(seam) and all(0.8 - 1e-6 <= s <= 1.4 + 1e-6 for s in seam)
     und = [rnd[k]["amp"] for k in rnd if k.startswith("undulate|")]
     und_ok = bool(und) and all(u <= 0.005 + 1e-9 for u in und)
@@ -593,6 +651,49 @@ def main():
           f"per-object 偏移={per_obj}；crown={crowns}（板间极差 "
           f"{[round(max(c) - min(c), 4) for c in crowns.values()]}）；缝线抖动={seam}；"
           f"微起伏幅度={und}；种子={report['random_seed']}/{len(rnd)} 项")
+
+
+    # ---- E18 器间束水平（v1.3 增）：两端点 z 落差 ≤0.05 m ----
+    drops = {t: beams["BEAM_link_%s" % t]["p_start"][2] - beams["BEAM_link_%s" % t]["p_end"][2]
+             for t in ("colA", "colB")}
+    check("E18", "两条器间束两端点 z 落差各 ≤0.05 m（回退单体后收光口随舱体回到 z≈0.51）",
+          all(abs(v) <= 0.05 for v in drops.values()),
+          "；".join(f"{t}:落 {v:+.3f} m（起 {beams['BEAM_link_%s' % t]['p_start'][2]:.3f} → "
+                    f"终 {beams['BEAM_link_%s' % t]['p_end'][2]:.3f}）" for t, v in drops.items()))
+
+    # ---- E19 材质参数表核对（v1.3 增）----
+    tank_mats = [m for m in bpy.data.materials if m.name.startswith("MAT_TANK_WHITE")]
+    mech_mats = [m for m in bpy.data.materials
+                 if m.name.startswith(("MAT_GIMBAL_GREY", "MAT_RECV_GREY", "MAT_AUX_GREY",
+                                       "MAT_up_alu", "MAT_up_grey"))]
+    panel_mats = [m for m in bpy.data.materials if m.name.startswith("MAT_PANEL_BLUE")]
+    def _num(m, name, default=-1.0):
+        v = mat_socket(m, name)
+        return default if v is None else float(v)
+
+    tank_ok = bool(tank_mats) and all(
+        0.82 <= (mat_base_color(m) or (-1,))[0] <= 0.92     # albedo≈0.87（颜色取 R 分量）
+        and 0.50 <= _num(m, "Roughness") <= 0.65
+        and _num(m, "Metallic") <= 0.05 for m in tank_mats)
+    mech_ok = bool(mech_mats) and all(
+        abs(_num(m, "Metallic") - 1.0) <= 0.01
+        and 0.30 <= _num(m, "Roughness") <= 0.50 for m in mech_mats)
+    panel_ok = bool(panel_mats) and all(
+        _num(m, "Metallic") <= 0.05
+        and (mat_base_color(m) or (0, 0, 0))[2] > (mat_base_color(m) or (0, 0, 0))[0]
+        and max(mat_base_color(m) or (1, 1, 1)) < 0.30
+        and _num(m, "Coat Weight", _num(m, "Clearcoat", 0.0)) > 0 for m in panel_mats)
+    tank_row = [[(mat_base_color(m) or (0, 0, 0))[0], mat_socket(m, "Roughness")]
+                for m in tank_mats]
+    mech_row = [(mat_socket(m, "Metallic"), mat_socket(m, "Roughness")) for m in mech_mats]
+    panel_base = [mat_base_color(m) for m in panel_mats]
+    panel_coat = [mat_socket(m, "Coat Weight") or mat_socket(m, "Clearcoat") for m in panel_mats]
+    check("E19", "材质参数表逐行核对：储箱＝AZ-93 白漆（albedo≈0.87、roughness∈[0.5,0.65]、电介质）；"
+                 "机构件 metallic=1、roughness∈[0.3,0.5]；翼板＝深蓝紫电介质基底＋盖玻璃 coat 镜面层",
+          tank_ok and mech_ok and panel_ok,
+          "储箱 %d 件 albedo/rough=%s；机构件 %d 件 metallic/rough=%s；翼板 %d 件 base=%s、coat=%s"
+          % (len(tank_mats), tank_row, len(mech_mats), mech_row,
+             len(panel_mats), panel_base, panel_coat))
 
 
 def report():

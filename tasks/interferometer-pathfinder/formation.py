@@ -9,18 +9,23 @@
     * 三器沿基线（Y）一字排开，合束器居中，集光器分居两侧；显示基线 B = 12 m
       （真实 20–100 m 不成比例，记录于 E12）；三器舱心 x/z 对齐。
     * 集光器 A 在 y=−B/2、窗口朝 +Y；B 在 y=+B/2、窗口朝 −Y（A 保持单体姿态，B 绕 Z 转 180°）。
-    * **合束器本体＝平台舱 bay**（§二.3／T3）：复用 assembly.py 的 bay 构造配方（1.24×3.60×0.50），
-      载荷舱/太阳翼/储箱仍逐字复用 combiner/collector 的构件函数——collector.py／combiner.py
-      几何零改动（阶段二 1.2 m 箱体标记为被平台舱规格取代的简化件）。
+    * **合束器＝阶段二单体整机复用**（§二.3 v1.7；v1.5 的 T3"bay 本体"经《验收反馈_04》作废）：
+      `combiner.build()` 整机——金色舱体 1.20×1.20×0.90＋载荷舱 Ø0.48×0.70 立于舱顶＋顶部机构簇
+      ＋±X 展开翼＋储箱×2，与集光器同规格（三器体量同级）。**不引用 assembly.py 的 bay**，
+      collector.py／combiner.py／assembly.py 三个文件一行不动。
     * 光束：星光粉粗（Φ0.24）自 +Z 垂直入射筒口、终点落最内光阑环截面（内嵌 ≤0.02 m），
       **长度按五张交付视角的视场反算**，任何视角都不在空中露出截止端面（§二.5）；
       器间束红细（Φ0.06）出光窗口→载荷舱收光口，两端各内嵌 0.02 m。
     * 推断默认件（v1.3 起维持）：RCS×4/器、测控天线×1/器、翼根铰链＋翼缘描边、筒口光阑环、
       机构簇转台＋细杆——全部为新增件，按单体**构建局部系**定位，不动已验收几何。
-    * **去周期化与随机性**（§二.8／§四，v1.5 新增）：MLI 用分形噪声（禁 Wave/Grid 周期纹理）
-      ＋Voronoi 分块缝线＋per-object 相位/缩放偏移；帆板微弯（crown 0.005–0.02 m，逐板随机）
-      ＋舱体大平面微起伏（≤5 mm）；板格线逐板抖动；一切随机量由**固定种子**派生（`_rng(key)`）
-      且记入 formation_report.json，可复现。
+    * **材质物理化（§四 v1.7）**：金色 MLI＝导体性金膜（metallic=1、F0≈(1.00,0.78,0.35)、
+      roughness 0.30–0.45）＋**厘米级双尺度分形褶皱**（特征尺度 0.01–0.05 m）＋细针脚低对比缝线；
+      储箱 AZ-93 白漆、机构件阳极氧化铝/钛、翼板深蓝紫电介质＋盖玻璃 coat，**参数表写死在脚本里**
+      （`MATERIAL_TABLE`），逐行落地并记入 report 供 E15/E19 回读。禁 Wave/Grid 与 Voronoi
+      距离边（大尺度分块）充当可见表面分割。
+    * **去周期化与随机性**（§二.8）：帆板微弯（crown 0.005–0.02 m，逐板随机）＋舱体大平面微起伏
+      （≤5 mm）；MLI 缝线间隔＝基准 ×U[0.8,1.4]；板格线逐板抖动；一切随机量由**固定种子**派生
+      （`_rng(key)`）且记入 formation_report.json，可复现。
     * 渲染管线（§五 v1.5）：主光＝星光源（+Z 主导，fill ≤0.2）；iso 加 f/2.8 景深；
       wide 按三分法重裁（编队占画面宽 ≥60%）；AgX＋Medium High Contrast（设后回读）。
 
@@ -41,7 +46,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-import assembly as A          # 只为 bay（平台舱）的构造配方与常量
 import collector as C
 import combiner as M
 
@@ -68,13 +72,13 @@ STAR_TOP_MAX = 120.0           # 反算上限（防呆）
 COL_STAR_BASE = (1.0, 0.56, 0.63)    # 规格 §四 基色
 COL_STAR_EMIT = (1.0, 0.18, 0.18)    # 实测反解发光色（配 1.0 强度 → 核心 R/G=1.66，基准 1.66）
 COL_LINK_BASE = (1.0, 0.165, 0.10)
-COL_LINK_EMIT = (1.0, 0.06, 0.06)    # 核心 R/G→2.5 量级、G=B（与基准同为中性红）
+COL_LINK_EMIT = (1.0, 0.05, 0.04)    # 规格 §四 表值（实测核心 R/G 2.46–2.88，基准 2.44）
 STAR_STRENGTH = 1.0              # 实测束体核心 R/G=1.66、R=0.867（基准 F5：1.66／0.886）
 LINK_STRENGTH = 3.0
 BEAM_DIFFUSE_DAMP = 0.05       # 束体漫反射反照压到 5%（光柱不是反射面，避免核心炸白）
 
 BG_TEXTURE = os.path.join(HERE, "..", "..", "assets", "textures", "8k_stars_milky_way.jpg")
-BG_STRENGTH = 0.60             # 预览档试 0.6；正式档待调定（§四）
+BG_STRENGTH = 0.80             # §四 允许 0.6–0.8，取上限给金属面一点环境反射
 GLARE_THRESHOLD = 1.0          # 只让光束与筒口过阈
 # Glare 跨版本：旧版（≤4.x）走节点属性、size 是 6–9 的档位；新版（5.x）走输入插槽、
 # Type 菜单吃显示名 "Fog Glow"、Size 是 0–1 的系数，另多出强度/饱和度/上限三个插槽。
@@ -84,7 +88,8 @@ GLARE_SIZE_OLD, GLARE_SIZE_NEW = 8, 0.55
 GLARE_STRENGTH_NEW, GLARE_SATURATION_NEW, GLARE_MAX_NEW = 0.35, 1.10, 2.5
 
 # §五 v1.5：主光＝星光源（+Z 主导），迎光面亮、背光面近黑；fill ≤0.2 仅防死黑
-SUN_DIR = (0.40, 0.22, 1.0)      # +Z 主导；掠射分量给 +Y 面（储箱/出光窗口所在面，side 视角所看）
+SUN_DIR = (0.85, 0.42, 1.0)      # +Z 主导（z 分量仍为最大）；约 47° 斜入，金属侧面才有光可反
+                                # +Y 掠射分量给储箱/出光窗口所在面（side 视角所看）
 SUN_ENERGY, FILL_ENERGY = 4.0, 0.20
 LOOK_NAME = "AgX - Medium High Contrast"
 TOP_CAM_Z = 5.0                # 俯视机位高度：正交俯视只受裁剪影响，压低才能让星光束"出画"
@@ -106,20 +111,40 @@ BAFFLE_MINOR = 0.016           # 环截面半径：外缘压进内壁 6 mm
 
 # ---- 去周期化（§二.8／§四 v1.5）----
 SEED = 20280930                # 全部随机量的主种子（E12/E17 记入 report）
-SEAM_BASE, SEAM_JITTER = 8.0, (0.8, 1.4)   # MLI 缝线基准密度与间隔抖动区间（×基准）
-ROUGH_RANGE = (0.66, 0.88)     # MLI roughness（§四：≥0.65，带变化）
+PANEL_CELL = 0.115             # 板格基准格距（与 collector.add_panel_grid 一致）
+COL_PANEL_V2 = (0.032, 0.036, 0.082)   # 深蓝紫电池色：压暗降饱和（B>R，仍读得出板格）
+COL_PANEL_LINE = (0.150, 0.175, 0.230)  # 盖玻璃拼缝细线（压暗的灰蓝）
+PANEL_SCALE_RANGE = ((0.92, 1.08),) * 3  # 逐板格距抖动（与逐器 jitter 合成 ≈±10%）
 OFFSET_RANGE = ((-0.9, 0.9), (-0.5, 0.5), (-1.3, 1.3))   # per-object 相位偏移（各轴解耦）
 SCALE_RANGE = (0.85, 1.25)     # per-object 缩放偏移（缺省三轴同值）
-MLI_STRETCH = ((0.75, 1.10), (0.28, 0.45), (0.75, 1.10))  # 褶皱沿 Y 拉长（薄膜不是疙瘩）
-PERIODIC_TEX = ("TEX_WAVE", "TEX_CHECKER", "TEX_MAGIC", "TEX_GRID")   # 周期纹理黑名单（E15）
 CROWN_CUTS = 10                # 帆板细分段数（立方体 8 角点必须先细分才弯得动）
 UND_CUTS = 6                   # 舱体大平面细分段数
 UND_AMP_RANGE = (0.003, 0.005)  # 大平面微起伏幅度（§二.8：≤0.005 m）
-PANEL_CELL = 0.115             # 板格基准格距（与 collector.add_panel_grid 一致）
-COL_PANEL_V2 = (0.050, 0.062, 0.145)   # 深蓝紫、压暗降饱和（B>R）
-COL_PANEL_LINE = (0.220, 0.250, 0.320)    # 板格线（压暗的灰蓝，不再刺眼）
-PANEL_SCALE_RANGE = ((0.92, 1.08),) * 3   # 逐板格距抖动（与逐器 jitter 合成 ≈±10%）
-PANEL_ROUGH = 0.45
+PERIODIC_TEX = ("TEX_WAVE", "TEX_CHECKER", "TEX_MAGIC", "TEX_GRID")
+MLI_BANNED = PERIODIC_TEX + ("TEX_VORONOI",)   # MLI 禁用：周期纹理＋大尺度分块（Voronoi 距离边）
+STITCH_BASE, STITCH_JITTER = 0.055, (0.8, 1.4)  # 细针脚基准间距与间隔抖动（§二.8）
+STITCH_BAND = 0.10                            # 阈值带宽（线宽＝带宽/噪声梯度，见 _stitch_width）
+
+# ---- 材料参数表（§四 v1.7：真实热控材料参数，**常量写死在脚本里，不许手调**）----
+# 落地位置：三器本体的文件一行不动，故本表在**场景内重建**材质（`_rebuild_materials`），
+# 逐行结果写入 report（`MATERIAL_LOG` → material_json），供 E15/E19 回读核验。
+MATERIAL_TABLE = {
+    "金色 MLI": dict(cls="mli", match=("MAT_BUS_MLI", "MAT_up_gold"),
+                     metallic=1.0, f0=(1.00, 0.78, 0.35), rough=(0.36, 0.45),   # 区间内偏上：金属高光更铺得开
+                     wrinkle=(0.035, 0.012), stretch=(1.00, 0.45, 1.00), stitch=True),
+    "乳白储箱": dict(cls="plain", match=("MAT_TANK_WHITE",),
+                  metallic=0.0, f0=(0.87, 0.87, 0.85), rough=(0.50, 0.65)),
+    "机构件": dict(cls="plain", match=("MAT_GIMBAL_GREY", "MAT_RECV_GREY", "MAT_AUX_GREY",
+                                       "MAT_up_alu", "MAT_up_grey"),
+                 metallic=1.0, rough=(0.30, 0.50)),
+    "翼板": dict(cls="panel", match=("MAT_PANEL_BLUE",),
+               metallic=0.0, f0=COL_PANEL_V2, rough=(0.28, 0.36),
+               coat=0.18, coat_rough=0.15, cell=PANEL_CELL, cell_jitter=0.10),   # 盖玻璃：轻镜面，不抢板色
+    "镜筒/载荷舱/光阑环（单体已固化）": dict(
+        cls="frozen", match=("MAT_TUBE_BLACK", "MAT_MODULE_GREY", "MAT_up_baffle",
+                             "MAT_port_black", "MAT_WINDOW_BLACK")),
+}
+MATERIAL_LOG = {}              # 参数表逐行落地台账（E15/E19 回读）
 
 # ---- 构图（§五 v1.5）----
 WIDE_FILL = 0.68               # wide 目标：编队占画面宽（判据 ≥0.60）
@@ -301,112 +326,182 @@ def _domain_warp(nt, vec, key, strength=0.14, scale=1.6):
     return add.outputs["Vector"]
 
 
-def _mli_surface(mat, key):
-    """金色 MLI 薄膜：分形噪声＋Voronoi 分块缝线；**禁 Wave/Grid**，per-object 相位/缩放偏移。
+def _mat_bsdf(m):
+    return next((n for n in m.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
 
-    §二.8 去周期化：手工铺覆的薄膜褶皱是随机分形。v1.3 那版用两向波带拼绗缝、呈规则网格，
-    E15 新判据直接判死。缝线间隔＝基准 ×U[0.8,1.4]，走向靠域扭曲偏斜。基色 default_value
-    不动（A6 判色读它）。
+
+def mat_color(m):
+    b = _mat_bsdf(m)
+    if not b:
+        return None
+    c = b.inputs["Base Color"].default_value
+    return (round(c[0], 4), round(c[1], 4), round(c[2], 4))
+
+
+def mat_rough(m):
+    b = _mat_bsdf(m)
+    return round(b.inputs["Roughness"].default_value, 4) if b else None
+
+
+def mat_metallic(m):
+    b = _mat_bsdf(m)
+    return round(b.inputs["Metallic"].default_value, 4) if b else None
+
+
+def _set_bsdf(b, spec, rough=None):
+    """把参数表的 metallic／F0／roughness 写进 Principled（roughness 取区间中值，再接线带变化）。"""
+    if "f0" in spec:
+        b.inputs["Base Color"].default_value = (*spec["f0"], 1.0)
+    b.inputs["Metallic"].default_value = spec["metallic"]
+    lo, hi = spec["rough"]
+    b.inputs["Roughness"].default_value = round((lo + hi) / 2, 3) if rough is None else rough
+
+
+def _stitch_width(scale, band=STITCH_BAND):
+    """细针脚视觉宽度的**解析估计**：宽度 ≈ 阈值带宽 / |∇噪声|，取 |∇|≈2π·scale·0.25。
+
+    （分形噪声幅度 ~U(0,1)，特征梯度按 2π·scale×0.25 估。）这是可复现的估计式、不是逐像素
+    测量，方法写在交付说明里；E15 由 report 台账核验 ≤0.01 m。
     """
-    r = _rng("mli|%s" % key)
-    base_scale = round(r.uniform(5.0, 9.0), 3)
-    seam_jit = round(r.uniform(*SEAM_JITTER), 3)
-    seam_scale = round(SEAM_BASE * seam_jit, 3)
-    fine = round(r.uniform(18.0, 30.0), 2)
-    bump_strength = round(r.uniform(0.16, 0.24), 3)
-    _log("mli|%s" % key, {"noise_scale": base_scale, "seam_scale": seam_scale,
-                          "seam_jitter": seam_jit, "fine_scale": fine,
-                          "bump_strength": bump_strength})
+    return band / (2 * math.pi * max(scale, 1e-6) * 0.25)
 
-    nt = mat.node_tree
-    for n in [n for n in nt.nodes if n.type in PERIODIC_TEX]:   # 清掉历史周期纹理（v1.3 的 Wave 绗缝）
-        nt.nodes.remove(n)
-    bsdf = next(n for n in nt.nodes if n.type == "BSDF_PRINCIPLED")
+
+def _aniso_scale(stretch):
+    """把各向异性拉伸折算成 per-object 缩放区间：轴向 i 的缩放 = stretch[i] × U(0.85,1.25)。"""
+    return tuple((s * SCALE_RANGE[0], s * SCALE_RANGE[1]) for s in stretch)
+
+
+def _apply_mli(m, spec, key):
+    """金色 MLI：导体性金膜（metallic=1＋金色 F0＋roughness 带变化）＋厘米级双尺度分形褶皱
+    ＋细针脚低对比缝线；per-object 相位/缩放偏移维持。
+
+    介观红线（§二.8 v1.7）：褶皱特征尺度 0.01–0.05 m；针脚视觉宽度 ≤0.01 m、bump 贡献
+    ≤褶皱幅度的 1/3；禁用 Wave/Grid 与 Voronoi 距离边充当可见表面分割。
+    """
+    r = _rng("mli|" + key)
+    feats = [round(f, 4) for f in spec["wrinkle"]]
+    jitter = round(r.uniform(*STITCH_JITTER), 3)
+    stitch_scale = 1.0 / (STITCH_BASE * jitter)
+    bump_w = round(r.uniform(0.22, 0.30), 3)
+    bump_s = math.floor(bump_w * 1000 / 3.0) / 1000   # 针脚 bump 严格 ≤ 褶皱的 1/3（下取整，红线）
+    rough_lo, rough_hi = spec["rough"]
+    nt = m.node_tree
+    for n in [n for n in nt.nodes if n.type in MLI_BANNED + ("BUMP",)]:
+        nt.nodes.remove(n)                          # 清掉历史实现（v1.5 的 Wave 绗缝／Voronoi 分块）
+    b = _mat_bsdf(m)
+    _set_bsdf(b, spec)
+    for nm in ("Specular IOR Level", "Specular"):
+        if nm in b.inputs:
+            b.inputs[nm].default_value = 0.5
+            break
     coord = nt.nodes.new("ShaderNodeTexCoord")
-    _, uv = _per_object(nt, coord.outputs["Object"], MLI_STRETCH)
-    uv = _domain_warp(nt, uv, key, strength=0.08, scale=1.1)
+    _, uv = _per_object(nt, coord.outputs["Object"], _aniso_scale(spec["stretch"]))
+    uv = _domain_warp(nt, uv, key, strength=0.05, scale=0.8)
 
-    n1 = nt.nodes.new("ShaderNodeTexNoise")        # 主褶皱（分形，detail≥3 是 E15/E17 的硬要求）
-    _set_in(n1, "Scale", base_scale)
-    _set_in(n1, "Detail", 6.0)
-    _set_in(n1, "Roughness", 0.55)
-    nt.links.new(uv, n1.inputs["Vector"])
-    n2 = nt.nodes.new("ShaderNodeTexNoise")        # 细褶
-    _set_in(n2, "Scale", fine)
-    _set_in(n2, "Detail", 4.0)
-    nt.links.new(uv, n2.inputs["Vector"])
-    vor = nt.nodes.new("ShaderNodeTexVoronoi")     # 分块缝线（Voronoi 单元边界，非周期）
-    try:
-        vor.feature = "DISTANCE_TO_EDGE"
-    except Exception:
-        pass
-    _set_in(vor, "Scale", seam_scale)
-    _set_in(vor, "Randomness", 1.0)
-    nt.links.new(uv, vor.inputs["Vector"])
-    seam = nt.nodes.new("ShaderNodeMapRange")
-    _set_in(seam, "From Min", 0.0)
-    _set_in(seam, "From Max", 0.028)
-    _set_in(seam, "To Min", 1.0)
-    _set_in(seam, "To Max", 0.0)
-    try:
-        seam.interpolation_type = "SMOOTHSTEP"
-    except Exception:
-        pass
-    nt.links.new(vor.outputs["Distance"], seam.inputs[0])
-
+    noises = []
+    for i, feat in enumerate(feats):
+        n = nt.nodes.new("ShaderNodeTexNoise")
+        _set_in(n, "Scale", 1.0 / feat)              # 特征尺度＝1/Scale（记录在案供 E15 核验）
+        _set_in(n, "Detail", 6.0 if i == 0 else 4.0)  # ≥3 octaves（§二.8）
+        _set_in(n, "Roughness", 0.55)
+        nt.links.new(uv, n.inputs["Vector"])
+        noises.append(n)
     a = nt.nodes.new("ShaderNodeMath")
     a.operation = "MULTIPLY"
-    a.inputs[1].default_value = 0.65
-    nt.links.new(n1.outputs["Fac"], a.inputs[0])
-    b = nt.nodes.new("ShaderNodeMath")
-    b.operation = "MULTIPLY_ADD"
-    b.inputs[1].default_value = 0.35
-    nt.links.new(n2.outputs["Fac"], b.inputs[0])
-    nt.links.new(a.outputs[0], b.inputs[2])
-    cut = nt.nodes.new("ShaderNodeMath")
-    cut.operation = "MULTIPLY"
-    cut.inputs[1].default_value = 0.34
-    nt.links.new(seam.outputs[0], cut.inputs[0])
-    h = nt.nodes.new("ShaderNodeMath")
-    h.operation = "SUBTRACT"
-    nt.links.new(b.outputs[0], h.inputs[0])
-    nt.links.new(cut.outputs[0], h.inputs[1])
+    a.inputs[1].default_value = 0.68
+    nt.links.new(noises[0].outputs["Fac"], a.inputs[0])
+    mix = nt.nodes.new("ShaderNodeMath")
+    mix.operation = "MULTIPLY_ADD"
+    mix.inputs[1].default_value = 0.32
+    nt.links.new(noises[1].outputs["Fac"], mix.inputs[0])
+    nt.links.new(a.outputs[0], mix.inputs[2])
+    bump1 = nt.nodes.new("ShaderNodeBump")
+    _set_in(bump1, "Strength", bump_w)
+    _set_in(bump1, "Distance", 0.004)
+    nt.links.new(mix.outputs[0], bump1.inputs["Height"])
 
-    bump = nt.nodes.new("ShaderNodeBump")
-    _set_in(bump, "Strength", bump_strength)
-    _set_in(bump, "Distance", 0.02)
-    nt.links.new(h.outputs[0], bump.inputs["Height"])
-    prev = [n for n in nt.nodes if n.type == "BUMP" and n is not bump]
-    if prev:                                        # 串在既有褶皱 bump 之后，两种质感都保留
-        nt.links.new(prev[0].outputs["Normal"], bump.inputs["Normal"])
-    nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
+    st = nt.nodes.new("ShaderNodeTexNoise")          # 细针脚：高频分形噪声→窄阈值带→细线
+    _set_in(st, "Scale", stitch_scale)
+    _set_in(st, "Detail", 3.0)
+    nt.links.new(uv, st.inputs["Vector"])
+    band = nt.nodes.new("ShaderNodeMapRange")
+    _set_in(band, "From Min", 0.62)
+    _set_in(band, "From Max", 0.62 + STITCH_BAND)
+    _set_in(band, "To Min", 0.0)
+    _set_in(band, "To Max", 1.0)
+    nt.links.new(st.outputs["Fac"], band.inputs[0])
+    bump2 = nt.nodes.new("ShaderNodeBump")
+    _set_in(bump2, "Strength", bump_s)
+    _set_in(bump2, "Distance", 0.002)
+    nt.links.new(band.outputs[0], bump2.inputs["Height"])
+    nt.links.new(bump1.outputs["Normal"], bump2.inputs["Normal"])
+    nt.links.new(bump2.outputs["Normal"], b.inputs["Normal"])
 
+    mr = nt.nodes.new("ShaderNodeMapRange")          # roughness 带变化
+    _set_in(mr, "To Min", rough_lo)
+    _set_in(mr, "To Max", rough_hi)
+    nt.links.new(noises[0].outputs["Fac"], mr.inputs[0])
+    nt.links.new(mr.outputs[0], b.inputs["Roughness"])
+
+    MATERIAL_LOG[key] = {
+        "material": m.name, "class": "金色 MLI", "metallic": spec["metallic"],
+        "base_color_F0": list(spec["f0"]), "rough_range": [rough_lo, rough_hi],
+        "wrinkle_feature_m": feats, "noise_detail": [6.0, 4.0],
+        "anisotropy_scale": list(spec["stretch"]),
+        "bump_wrinkle": bump_w, "bump_stitch": bump_s, "stitch_ratio": round(bump_s / bump_w, 3),
+        "stitch_scale_per_m": round(stitch_scale, 3), "stitch_jitter": jitter,
+        "stitch_width_est_m": round(_stitch_width(stitch_scale), 4),
+        "banned_nodes_present": [n.type for n in nt.nodes if n.type in MLI_BANNED],
+    }
+    return MATERIAL_LOG[key]
+
+
+def _apply_plain(m, spec, key, label):
+    """储箱白漆／机构件金属：按参数表设 metallic 与 roughness 带（噪波驱动变化）。"""
+    nt = m.node_tree
+    for n in [n for n in nt.nodes if n.type == "BUMP"]:
+        nt.nodes.remove(n)
+    b = _mat_bsdf(m)
+    _set_bsdf(b, spec)
+    rough_lo, rough_hi = spec["rough"]
+    coord = nt.nodes.new("ShaderNodeTexCoord")
+    _, uv = _per_object(nt, coord.outputs["Object"])
+    noise = nt.nodes.new("ShaderNodeTexNoise")
+    _set_in(noise, "Scale", 6.0)
+    _set_in(noise, "Detail", 3.0)
+    nt.links.new(uv, noise.inputs["Vector"])
     mr = nt.nodes.new("ShaderNodeMapRange")
-    _set_in(mr, "To Min", ROUGH_RANGE[0])
-    _set_in(mr, "To Max", ROUGH_RANGE[1])
-    nt.links.new(n1.outputs["Fac"], mr.inputs[0])
-    nt.links.new(mr.outputs[0], bsdf.inputs["Roughness"])
-    return bump
+    _set_in(mr, "To Min", rough_lo)
+    _set_in(mr, "To Max", rough_hi)
+    nt.links.new(noise.outputs["Fac"], mr.inputs[0])
+    nt.links.new(mr.outputs[0], b.inputs["Roughness"])
+    MATERIAL_LOG[key] = {"material": m.name, "class": label, "metallic": spec["metallic"],
+                         "base_color": mat_color(m), "rough_range": [rough_lo, rough_hi]}
+    return MATERIAL_LOG[key]
 
 
-def _panel_surface(mat, key):
-    """翼板面：深蓝紫、压暗降饱和、掠射近黑；板格线**逐板抖动**（域扭曲＋per-object 相位）。
+def _apply_panel(m, spec, key):
+    """翼板：深蓝紫电介质基底＋**盖玻璃 coat 镜面层**；板格线逐板抖动（域扭曲＋per-object 相位）。
 
-    板格仍是两向波带（矩形电池片的形制），但坐标经域扭曲＋逐板相位/格距偏移后不再呈
-    规则网格——§二.8 的"缝线/板格不得规则铺满"由此满足；周期纹理黑名单只针对 MLI bump（E15）。
+    板格仍是两向波带（矩形电池片的形制），坐标经域扭曲＋逐器格距抖动＋逐板相位偏移后不再呈
+    规则网格；周期纹理黑名单只针对 MLI（E15）。
     """
-    jit = _rand("panelcell|%s" % key, 0.90, 1.10)      # 板格格距逐器抖动 ±10%
-    _log("panel|%s" % key, {"cell_jitter": jit, "cell_m": round(PANEL_CELL * jit, 4)})
-    nt = mat.node_tree
+    jit = _rand("panelcell|%s" % key, 1.0 - spec["cell_jitter"], 1.0 + spec["cell_jitter"])
+    nt = m.node_tree
     for n in [n for n in nt.nodes if n.type in ("TEX_WAVE", "TEX_CHECKER", "TEX_MAGIC")]:
         nt.nodes.remove(n)
-    bsdf = next(n for n in nt.nodes if n.type == "BSDF_PRINCIPLED")
-    bsdf.inputs["Base Color"].default_value = (*COL_PANEL_V2, 1.0)
-    bsdf.inputs["Roughness"].default_value = PANEL_ROUGH
-    for spec in ("Specular IOR Level", "Specular"):
-        if spec in bsdf.inputs:
-            bsdf.inputs[spec].default_value = 0.18     # 掠射角近黑
+    b = _mat_bsdf(m)
+    _set_bsdf(b, spec)
+    for nm in ("Specular IOR Level", "Specular"):
+        if nm in b.inputs:
+            b.inputs[nm].default_value = 0.5
             break
+    coat = {}
+    for nm, val in (("Coat Weight", spec["coat"]), ("Coat Roughness", spec["coat_rough"]),
+                    ("Coat IOR", 1.45)):
+        if nm in b.inputs:
+            b.inputs[nm].default_value = val
+            coat[nm] = val
     coord = nt.nodes.new("ShaderNodeTexCoord")
     _, uv = _per_object(nt, coord.outputs["Object"], PANEL_SCALE_RANGE)
     uv = _domain_warp(nt, uv, key, strength=0.10, scale=1.2)
@@ -415,8 +510,8 @@ def _panel_surface(mat, key):
         w = nt.nodes.new("ShaderNodeTexWave")
         w.wave_type = "BANDS"
         w.bands_direction = direction
-        _set_in(w, "Scale", 1.0 / (PANEL_CELL * jit))
-        _set_in(w, "Distortion", 1.2)                  # 线本身也允许小幅偏斜
+        _set_in(w, "Scale", 1.0 / (spec["cell"] * jit))
+        _set_in(w, "Distortion", 1.2)
         _set_in(w, "Detail", 1.0)
         nt.links.new(uv, w.inputs["Vector"])
         waves.append(w)
@@ -434,25 +529,37 @@ def _panel_surface(mat, key):
     ramp.color_ramp.elements[1].position = 0.5
     ramp.color_ramp.elements[1].color = (*COL_PANEL_LINE, 1.0)
     nt.links.new(thr.outputs["Value"], ramp.inputs["Fac"])
-    nt.links.new(ramp.outputs["Color"], bsdf.inputs["Base Color"])
+    nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
+    MATERIAL_LOG[key] = {
+        "material": m.name, "class": "翼板", "metallic": spec["metallic"],
+        "base_color_F0": list(spec["f0"]), "rough_range": list(spec["rough"]),
+        "coat": coat, "cell_m": round(spec["cell"] * jit, 4), "cell_jitter": jit,
+        "thin_film": "未启用（规格标为可选）",
+    }
+    return MATERIAL_LOG[key]
 
 
-def _subtle_bump(mat, key, strength=0.12, scale=9.0):
-    """给无 bump 的构件（翼板）加一层极轻的分形噪声凹凸，免得成为"完美平板"。"""
-    nt = mat.node_tree
-    if any(n.type == "BUMP" for n in nt.nodes):
-        return
-    bsdf = next(n for n in nt.nodes if n.type == "BSDF_PRINCIPLED")
-    coord = nt.nodes.new("ShaderNodeTexCoord")
-    _, uv = _per_object(nt, coord.outputs["Object"])
-    n = nt.nodes.new("ShaderNodeTexNoise")
-    _set_in(n, "Scale", scale)
-    _set_in(n, "Detail", 5.0)
-    nt.links.new(uv, n.inputs["Vector"])
-    bump = nt.nodes.new("ShaderNodeBump")
-    _set_in(bump, "Strength", strength)
-    nt.links.new(n.outputs["Fac"], bump.inputs["Height"])
-    nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
+def _rebuild_materials():
+    """按 §四 参数表在**场景内重建**材质（collector.py／combiner.py／assembly.py 一行不动）。
+
+    返回逐行落地台账（写入 report 的 material_json），供 E15/E19 回读核验。
+    """
+    MATERIAL_LOG.clear()
+    for label, spec in MATERIAL_TABLE.items():
+        for m in list(bpy.data.materials):
+            if not any(m.name.startswith(p) for p in spec["match"]):
+                continue
+            if spec["cls"] == "frozen":
+                MATERIAL_LOG[m.name] = {"material": m.name, "class": label,
+                                        "note": "单体已固化值不动（E15 只判 MAT_tube* ≥0.85）",
+                                        "roughness": mat_rough(m), "metallic": mat_metallic(m)}
+            elif spec["cls"] == "mli":
+                _apply_mli(m, spec, m.name)
+            elif spec["cls"] == "panel":
+                _apply_panel(m, spec, m.name)
+            else:
+                _apply_plain(m, spec, m.name, label)
+    return MATERIAL_LOG
 
 
 # ============================================================ 几何微起伏（§二.8）
@@ -601,7 +708,7 @@ def upgrade(objs, tag, has_tube):
     grey = C.new_material("MAT_up_grey", (0.55, 0.56, 0.58), 0.45, 0.60)
     added = []
 
-    body = objs.get("bus") or objs["bay"]
+    body = objs["bus"]
     # 去周期化①：本体大平面微起伏（幅度 ≤5 mm）——先变形，后续构件才贴在真实面上
     _undulate_mesh(body, "%s|body" % tag)
     # 去周期化②：帆板微弯（crown 0.005–0.02 m）——逐板随机、方向随机
@@ -675,58 +782,20 @@ def upgrade(objs, tag, has_tube):
             added.append(_axis_piece("ROD_%02d" % (i + 1), end + axis * 0.067, axis,
                                      0.014, 0.090, grey, verts=12))
 
-    # 6) 材料轨：本体金色 MLI 换分形噪声面；翼板换深蓝紫＋抖动板格（只动本器的材质实例）
-    mat = body.data.materials[0] if body.data.materials else None
-    if mat is not None and not mat.get("mli_done"):
-        _mli_surface(mat, tag)
-        mat["mli_done"] = True
-    panels = [o for k, o in objs.items() if k.startswith("panel_")]
-    if panels:
-        pmat = panels[0].data.materials[0] if panels[0].data.materials else None
-        if pmat is not None and not pmat.get("panel_done"):
-            _panel_surface(pmat, tag)
-            _subtle_bump(pmat, tag)
-            pmat["panel_done"] = True
     return added
 
 
 # ============================================================ 构件
-def build_cmb_parts():
-    """合束器本体＝平台舱 bay（§二.3／T3）：复用 assembly.py 的 bay 配方＋combiner 的载荷舱。
-
-    **不调 assembly 的 `_group`**：那只建自己的 holder，会绕开 formation "先局部系、后加前缀
-    挂父级"的流程，跨器改名与父级都会错。载荷舱组/翼/储箱仍逐字复用 combiner/collector 的函数。
-    """
-    bay = A.build_bay()
-    bay.location = (0.0, 0.0, 0.0)          # assembly 系里 bay 顶面在 z=0；这里改以箱心为原点
-    parts = {"bay": bay}
-    grp = [M.build_module()] + M.build_recv() + [M.build_aux()]
-    lo = min(p[2] for p in _vlocal(grp))
-    for o in grp:                            # 载荷舱落 bay 顶面、根部嵌入 MODULE_EMBED
-        o.location = (o.location.x, o.location.y,
-                      o.location.z + ((A.BAY_T / 2 - A.MODULE_EMBED) - lo))
-    for o in grp:
-        parts[o.name.split(".")[0]] = o
-    panels, _ = C.build_panels()             # 展开态，外移到 bay 的 ±X 面
-    shift = A.BAY_W / 2 - (C.BUS_W / 2 - C.PANEL_FLUSH)
-    for p in panels:
-        p.location.x += math.copysign(shift, p.location.x)
-        parts[p.name.split(".")[0]] = p
-    for t in C.build_tanks(face="X±"):       # ±X 面乳白储箱 ×2
-        parts[t.name.split(".")[0]] = t
-    return parts
-
-
 def build_spacecraft():
-    """三器：集光器逐字复用单体 build()；合束器用 bay 本体。返回 {tag: {holder, objs, outline_*}}。
+    """三器：集光器与合束器都逐字复用阶段一/二单体 build()。返回 {tag: {holder, objs, outline_*}}。
 
-    objs 的键是**改名后**的名字（colA_bus / cmb_bay 等）；升级件与去周期化处理都在 group()
+    objs 的键是**改名后**的名字（colA_bus / cmb_module 等）；升级件与去周期化处理都在 group()
     之前完成（局部系），与本体件一起被加前缀、挂父级。
     """
     half = BASELINE_DISPLAY / 2
     specs = (("colA", C.build(purge=False), (0.0, -half, 0.0), 0.0),    # A 在 −Y：窗口朝 +Y
              ("colB", C.build(purge=False), (0.0, +half, 0.0), 180.0),  # B 在 +Y：窗口朝 −Y
-             ("cmb", build_cmb_parts(), (0.0, 0.0, 0.0), 0.0))
+             ("cmb", M.build(purge=False), (0.0, 0.0, 0.0), 0.0))
     out = {}
     for tag, objs, loc, rot in specs:
         parts = list(objs.values())
@@ -1153,9 +1222,12 @@ def build():
                                "MAT_beam_link 基色 %s／发光 %s／强度 %g"
                                % (COL_STAR_BASE, COL_STAR_EMIT, STAR_STRENGTH,
                                   COL_LINK_BASE, COL_LINK_EMIT, LINK_STRENGTH))
-    layout["cmb_body"] = "bay %g×%g×%g（平台舱，T3／§二.3）" % (A.BAY_W, A.BAY_L, A.BAY_T)
+    layout["cmb_body"] = "阶段二单体整机（舱 %.2f×%.2f×%.2f＋载荷舱 Ø%.2f×%.2f，§二.3 v1.7）" \
+        % (C.BUS_W, C.BUS_D, C.BUS_H, 2 * M.MODULE_R + 2 * M.MODULE_RIM_OVER, M.MODULE_H)
 
     craft = build_spacecraft()
+    _rebuild_materials()                      # §四 参数表：场景内重建（三器文件不动）
+    layout["material_json"] = json.dumps(MATERIAL_LOG, ensure_ascii=False, sort_keys=True)
     for tag, rec in craft.items():
         holder = rec["holder"]
         holder.parent = layout
@@ -1174,7 +1246,7 @@ def build():
     ports = build_ports(craft["cmb"]["objs"])
     # 星光束长度按五张交付视角的视场反算（§二.5）——必须先有相机与视角表
     cam = add_camera()
-    zc = vcenter(bpy.data.objects.get("colA_bus") or bpy.data.objects["cmb_bay"])[2]
+    zc = vcenter(bpy.data.objects["colA_bus"])[2]
     axes, mouth = star_axes_and_mouth(craft)
     views = view_table(cam, zc)
     top_z = solve_star_top_z(cam, axes, mouth + STAR_ABOVE_MIN, views)
@@ -1198,14 +1270,16 @@ def build():
 def report(objs, beams):
     lo, hi = vbounds([o for o in objs.values() if o.type == "MESH"])
     cA, cB = vcenter(objs["colA_bus"]), vcenter(objs["colB_bus"])
-    cmb_body = objs.get("cmb_bay") or objs.get("cmb_bus")
+    cmb_body = objs["cmb_bus"]
     bl, bh = vbounds([cmb_body])
     print("[formation] 编队：显示基线 %.1f m（真实 %g–%g m，不成比例）"
           % (BASELINE_DISPLAY, *BASELINE_REAL_M), flush=True)
     print("[formation] 实测基线 |y_colA−y_colB| = %.3f m；合束器 y = %+.3f"
           % (abs(cA[1] - cB[1]), vcenter(cmb_body)[1]), flush=True)
-    print("[formation] 合束器本体 bay：%.3f × %.3f × %.3f m（长轴沿 Y＝基线）"
-          % (bh[0] - bl[0], bh[1] - bl[1], bh[2] - bl[2]), flush=True)
+    print("[formation] 合束器（阶段二单体）：舱 %.3f × %.3f × %.3f m；载荷舱 %.3f × %.3f × %.3f m"
+          % (bh[0] - bl[0], bh[1] - bl[1], bh[2] - bl[2],
+             *[vbounds([objs["cmb_module"]])[1][i] - vbounds([objs["cmb_module"]])[0][i]
+               for i in range(3)]), flush=True)
     print("[formation] 光束：星光 Φ%.2f（粉）/ 器间 Φ%.2f（红），束径比 %.1f:1"
           % (D_STAR, D_LINK, D_STAR / D_LINK), flush=True)
     for b in beams:
