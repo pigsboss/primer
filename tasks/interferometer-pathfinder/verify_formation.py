@@ -3,8 +3,9 @@
 
 用法：blender --background --python verify_formation.py
 输出：out/formation/verify_log.txt 与 out/formation/formation_report.json（E12）。
-判据逐条对应《阶段四_验收清单》E1–E12，不自增删。全部几何判定用网格顶点真实包围盒；
-读取失败即 FAIL；main() 异常打印 traceback。
+判据逐条对应《阶段四_验收清单》v1.1 E1–E16，不自增删；每条判据的证据都从**场景网格实测**取，
+不采信建模脚本的自报值（E14 的包络增量即按"新增件与单体件分开测"独立复算）。
+全部几何判定用网格顶点真实包围盒；读取失败即 FAIL；main() 异常打印 traceback。
 """
 import json
 import math
@@ -23,6 +24,10 @@ OUT = os.path.join(HERE, "out", "formation")
 os.makedirs(OUT, exist_ok=True)
 LOG = os.path.join(OUT, "verify_log.txt")
 REPORT = os.path.join(OUT, "formation_report.json")
+
+# v1.3 新增件的命名标记——E13/E14 据此把"推断默认件"与单体件分开（不依赖命名前缀之外的约定）
+V13_MARKS = ("_RCS_", "_ANT_", "_HINGE_", "_EDGE_", "_BAFFLE_", "_TURNTABLE_", "_ROD_")
+ENV_R, ENV_H = 1.825, 4.610        # 阶段三 D11 的包络常数：本阶段沿用其"包络不被撑破"的连续性
 
 results = []
 
@@ -53,6 +58,22 @@ def dims(objs):
 def ctr(o):
     lo, hi = bb([o])
     return [(lo[i] + hi[i]) / 2 for i in range(3)]
+
+
+def local_bb(objs, holder):
+    """换算到该器**自身坐标系**（除掉 holder 的位移与转向）后取包围盒。
+
+    三器朝向不同（colB 绕 Z 转 180°），只有回到自身系，量出来的才是"单体外形"。
+    """
+    m = holder.matrix_world.inverted()
+    pts = [m @ (o.matrix_world @ v.co) for o in objs for v in o.data.vertices]
+    return ([min(p[i] for p in pts) for i in range(3)],
+            [max(p[i] for p in pts) for i in range(3)])
+
+
+def contains(o, pt, eps=0.002):
+    lo, hi = bb([o])
+    return all(lo[i] - eps <= pt[i] <= hi[i] + eps for i in range(3))
 
 
 def bvh(objs):
@@ -89,6 +110,21 @@ def mat_emission(o):
     return None
 
 
+def mat_roughness(m):
+    if not m or not m.use_nodes:
+        return None
+    for n in m.node_tree.nodes:
+        if n.type == "BSDF_PRINCIPLED":
+            return n.inputs["Roughness"].default_value
+    return None
+
+
+def bump_strengths(m):
+    if not m or not m.use_nodes:
+        return []
+    return [n.inputs["Strength"].default_value for n in m.node_tree.nodes if n.type == "BUMP"]
+
+
 def png_size(p):
     with open(p, "rb") as f:
         h = f.read(24)
@@ -104,6 +140,8 @@ def main():
         import formation
         if hasattr(formation, "build"):
             formation.build()
+        # 主光/星场/sun_dir 属场景构件：E12 的记录项与 E16 都取自此，故一并建立
+        formation.build_render_env(final=False)
     except Exception:
         traceback.print_exc()
         check("EX", "formation 导入/构建异常", False, traceback.format_exc(limit=3))
@@ -161,23 +199,26 @@ def main():
           upright and tilt == [0.0, 0.0] and face_ok,
           f"筒dz/dxy={tA[2]:.2f}/{tA[0]:.2f}；tilt={tilt}；窗口y={wA:+.2f},{wB:+.2f}（舱心{ya:+.1f},{yb:+.1f}）")
 
-    # ---- E5 星光束端点 ----
+    # ---- E5 星光束端点（v1.3：终点落**最内光阑环**截面，内嵌判据不变）----
     detail, ok = [], True
     for t in ("colA", "colB"):
         tube = find("%s_tube" % t)
         tl, th = bb([tube])
         tx, ty = (tl[0] + th[0]) / 2, (tl[1] + th[1]) / 2
+        rings = [o for o in group_objs(t) if "_BAFFLE_" in o.name]
+        ring_z = min(ctr(o)[2] for o in rings) if rings else th[2]   # 最内环＝最低那道
         b = beams["BEAM_star_%s" % t]
         p0, p1 = b["p_start"], b["p_end"]
-        embed = th[2] - p0[2]
+        embed = ring_z - p0[2]
         axis_ok = abs(p0[0] - tx) <= 0.01 and abs(p0[1] - ty) <= 0.01
         above_ok = p1[2] >= th[2] + 2.0
         inter = [o.name for o in group_objs(t)
                  if o.type == "MESH" and o is not b and bvh([b]).overlap(bvh([o]))]
         good = 0 <= embed <= 0.02 and axis_ok and above_ok and not inter
         ok = ok and good
-        detail.append(f"{t}:内嵌{embed:.3f}/轴偏({p0[0] - tx:+.3f},{p0[1] - ty:+.3f})/高出{p1[2] - th[2]:.2f}/相交{inter or '无'}")
-    check("E5", "星光束终点落在筒口截面（内嵌≤0.02）、起点高出≥2 m、除筒口外无相交", ok,
+        detail.append(f"{t}:离最内环{embed:.3f}/轴偏({p0[0] - tx:+.3f},{p0[1] - ty:+.3f})/"
+                      f"高出{p1[2] - th[2]:.2f}/相交{inter or '无'}")
+    check("E5", "星光束终点落在筒口**最内光阑环**截面（内嵌≤0.02）、起点高出≥2 m、除筒口外无相交", ok,
           "；".join(detail))
 
     # ---- E6 器间束端点与连接 ----
@@ -257,7 +298,8 @@ def main():
             for ob in group_objs(b):
                 if oa.type == "MESH" and ob.type == "MESH" and bvh([oa]).overlap(bvh([ob])):
                     cross.append((oa.name, ob.name))
-    check("E10", "三器两两间距 ≥ 舱宽；三器之间无网格相交", dmin >= bus_w and not cross,
+    e10_ok = dmin >= bus_w and not cross
+    check("E10", "三器两两间距 ≥ 舱宽；三器之间无网格相交", e10_ok,
           f"最小间距={dmin:.3f} m（需≥{bus_w:.2f}）；相交对={cross or '无'}")
 
     # ---- E11 渲染自检 ----
@@ -266,27 +308,135 @@ def main():
     check("E11", "out/formation/ 五张 PNG ≥1200×900",
           all(w >= 1200 and h >= 900 for w, h in sizes.values()), f"{sizes}")
 
+    # ---- v1.3 升级件清点（E13–E16 判据与 E12 记录共用；独立实测，不采信建模脚本自报）----
+    v13 = {}
+    for t in ("colA", "colB", "cmb"):
+        meshes = [o for o in group_objs(t) if o.type == "MESH"]
+        added = [o for o in meshes if any(k in o.name for k in V13_MARKS)]
+        base = [o for o in meshes if o not in added]
+        holder = find(t + "_ROOT")
+        blo, bhi = local_bb(base, holder)
+        alo, ahi = local_bb(base + added, holder)
+        gain = [max(ahi[i] - bhi[i], blo[i] - alo[i], 0.0) for i in range(3)]
+        v13[t] = {
+            "unit_parts": len(meshes), "added_parts": len(added),
+            "outline_gain_m": [round(g, 4) for g in gain],
+            "outline_gain_max_m": round(max(gain), 4),
+            "envelope_m": [round(ahi[i] - alo[i], 4) for i in range(3)],
+            "y_max_m": round(max(abs(alo[1]), abs(ahi[1])), 4),
+            "z_max_m": round(ahi[2], 4),
+            "n_rcs": len([o for o in added if "_RCS_" in o.name]),
+            "n_ant": len([o for o in added if "_ANT_" in o.name]),
+            "n_hinge": len([o for o in added if "_HINGE_" in o.name]),
+            "n_edge": len([o for o in added if "_EDGE_" in o.name]),
+            "n_baffle": len([o for o in added if "_BAFFLE_" in o.name]),
+            "n_cluster": len([o for o in meshes if "_gimbal" in o.name
+                              or "_TURNTABLE_" in o.name or "_ROD_" in o.name]),
+            "panel_thickness_m": [round(min(dims([o])), 4) for o in meshes if "_panel_" in o.name],
+        }
+
     # ---- E12 记录项 ----
+    bus_mats = sorted(m.name for m in bpy.data.materials if m.name.startswith("MAT_BUS_MLI"))
+    tube_mats = sorted(m.name for m in bpy.data.materials if m.name.startswith("MAT_TUBE_BLACK"))
     report = {
         "baseline_real_m": layout.get("baseline_real_m"),
         "baseline_display_m": layout.get("baseline_display_m"),
         "beam_d_star_m": ds, "beam_d_link_m": dl, "beam_ratio": round(ratio, 3),
         "beam_materials": {"MAT_beam_star": list(st or ()), "MAT_beam_link": list(lk or ()),
                            "star_strength": mat_emission(beams["BEAM_star_colA"]),
-                           "link_strength": mat_emission(beams["BEAM_link_colA"])},
+                           "link_strength": mat_emission(beams["BEAM_link_colA"]),
+                           "note": "发光色按 F3/F5 实测束色反解，非规格字面值；见交付说明差异清单"},
         "wing_state_T1": layout.get("wing_state"),
         "ports_T2": {"object": "cmb_port_posY / cmb_port_negY",
                      "口径_m": max(dims([find("cmb_port_posY")])[:2]) if find("cmb_port_posY") else None},
+        "sun_dir": list(layout.get("sun_dir") or ()),
+        "starfield": {"texture": layout.get("starfield_texture"),
+                      "strength": layout.get("starfield_strength")},
         "colorspace": {"view_transform": bpy.context.scene.view_settings.view_transform,
                        "look": bpy.context.scene.view_settings.look},
+        "materials_v13": {"bus_MLI": bus_mats, "tube_black": tube_mats,
+                          "edge_trim": sorted({m.name for m in bpy.data.materials
+                                               if m.name.startswith("MAT_up_alu")})},
+        "upgrade_v13": v13,
         "renders": {k: list(v) for k, v in sizes.items()},
     }
     with open(REPORT, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
-    check("E12", "formation_report.json 记录真实/显示基线、束径、材质、翼态",
+    check("E12", "formation_report.json 记录真实/显示基线、束径、材质、翼态、sun_dir、星场强度",
           all(report.get(k) is not None for k in ("baseline_real_m", "baseline_display_m",
-                                                 "beam_d_star_m", "wing_state_T1")),
+                                                  "beam_d_star_m", "wing_state_T1"))
+          and report["sun_dir"] and report["starfield"]["strength"] is not None,
           f"已写 {os.path.relpath(REPORT, HERE)}")
+
+    # ---- E13 推断默认件齐备（v1.3 §二.7）----
+    bad = []
+    for t in ("colA", "colB", "cmb"):
+        d = v13[t]
+        if d["n_rcs"] != 4:
+            bad.append(f"{t}RCS={d['n_rcs']}")
+        if d["n_ant"] != 1:
+            bad.append(f"{t}天线={d['n_ant']}")
+        if d["n_hinge"] < 1:
+            bad.append(f"{t}铰链={d['n_hinge']}")
+        if d["n_edge"] != len(d["panel_thickness_m"]):
+            bad.append(f"{t}翼缘={d['n_edge']}/{len(d['panel_thickness_m'])}")
+        if not all(0.02 <= v <= 0.04 for v in d["panel_thickness_m"]):
+            bad.append(f"{t}翼厚={d['panel_thickness_m']}")
+    for t in ("colA", "colB"):
+        d = v13[t]
+        if d["n_baffle"] < 1:
+            bad.append(f"{t}光阑环={d['n_baffle']}")
+        if d["n_cluster"] < 3:
+            bad.append(f"{t}机构簇={d['n_cluster']}")
+    check("E13", "推断默认件齐备：每器 RCS 喷管×4、测控天线×1、翼板厚 0.02–0.04 且根部有铰链、"
+                 "筒口光阑环≥1、集光器机构簇≥3 件",
+          not bad,
+          f"RCS={[v13[t]['n_rcs'] for t in v13]}；天线={[v13[t]['n_ant'] for t in v13]}；"
+          f"铰链={[v13[t]['n_hinge'] for t in v13]}；翼缘={[v13[t]['n_edge'] for t in v13]}；"
+          f"翼厚={v13['colA']['panel_thickness_m']}；光阑环={[v13[t]['n_baffle'] for t in v13]}；"
+          f"机构簇={[v13[t]['n_cluster'] for t in v13]}；异常={bad or '无'}")
+
+    # ---- E14 新增件包络（v1.3 §二.7 红线）----
+    gain_max = max(v13[t]["outline_gain_max_m"] for t in v13)
+    cont_ok = all(v13[t]["y_max_m"] <= ENV_R and v13[t]["envelope_m"][2] <= ENV_H for t in v13)
+    check("E14", "新增件包络：单体最大外形增量 ≤0.15 m；D11 包络连续（本体 ≤1.825/4.610）；E10 仍通过",
+          gain_max <= 0.15 and cont_ok and e10_ok,
+          f"逐器增量(x,y,z)={ {t: v13[t]['outline_gain_m'] for t in v13} }；最大 {gain_max:.4f} m；"
+          f"本体 y_max={[v13[t]['y_max_m'] for t in v13]}、总高={[v13[t]['envelope_m'][2] for t in v13]}；"
+          f"E10={e10_ok}")
+
+    # ---- E15 材质管线（v1.3 §四）----
+    bumps = {m.name: bump_strengths(m) for m in bpy.data.materials if m.name.startswith("MAT_BUS_MLI")}
+    bump_ok = bool(bumps) and all(v and max(v) > 0 for v in bumps.values())
+    rough = {m.name: mat_roughness(m) for m in bpy.data.materials if m.name.startswith("MAT_TUBE_BLACK")}
+    rough_ok = bool(rough) and all(v is not None and v >= 0.85 for v in rough.values())
+    edge_bad = []
+    for t in ("colA", "colB", "cmb"):
+        panels = [o for o in group_objs(t) if "_panel_" in o.name]
+        edges = [o for o in group_objs(t) if "_EDGE_" in o.name]
+        for p in panels:
+            hit = [e for e in edges if contains(e, ctr(p))]
+            if not hit:
+                edge_bad.append("%s 无描边" % p.name)
+            elif mat_color(hit[0]) == mat_color(p):
+                edge_bad.append("%s 描边同色" % p.name)
+    check("E15", "材质管线：MAT_bus* 含 bump（强度>0）、MAT_tube* roughness ≥0.85、翼缘有描边材质",
+          bump_ok and rough_ok and not edge_bad,
+          f"MLI bump={ {k: [round(x, 2) for x in v] for k, v in bumps.items()} }；"
+          f"镜筒 roughness={ {k: round(v, 2) for k, v in rough.items()} }；"
+          f"翼缘={len([o for o in bpy.data.objects if '_EDGE_' in o.name])} 件，异常={edge_bad or '无'}")
+
+    # ---- E16 主光（v1.3 §五）----
+    lights = [o for o in bpy.data.objects if o.type == "LIGHT"]
+    keys = [o for o in lights if o.get("role") == "key"]
+    fills = [o for o in lights if o.get("role") != "key"]
+    sun_ok = len(keys) == 1 and keys[0].data.type == "SUN"      # 平行光：各器受光方向天然一致
+    fill_ok = all(o.data.energy < keys[0].data.energy for o in fills) if (keys and fills) else True
+    sdir = layout.get("sun_dir")
+    check("E16", "存在单一主光源（SUN 平行光→三器受光方向一致）、补光弱于主光、sun_dir 已记入自定义属性",
+          sun_ok and fill_ok and sdir is not None,
+          f"光源={[(o.name, o.data.type, o.data.energy, o.get('role')) for o in lights]}；"
+          f"sun_dir={list(sdir) if sdir else None}")
 
 
 def report():

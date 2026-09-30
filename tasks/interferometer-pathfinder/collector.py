@@ -260,7 +260,7 @@ def build_tube():
     bpy.ops.mesh.primitive_cylinder_add(vertices=48, radius=r, depth=0.02,
                                         location=(TUBE_X, TUBE_Y, z0 + 0.01))
     parts.append(bpy.context.active_object)
-    return join_into(parts, "tube", new_material("MAT_TUBE_BLACK", COL_TUBE, 0.78, 0.03))
+    return join_into(parts, "tube", new_material("MAT_TUBE_BLACK", COL_TUBE, 0.88, 0.03))
 
 
 def _mechanism(name, px, py, top_z, base_size, cyl_r, cyl_l, tilt_deg, azimuth_deg, material):
@@ -384,19 +384,24 @@ def build_window():
     return ob
 
 
-def build():
-    """生成整器。返回对象字典，供 verify.py 与后续阶段（合束器/组合体）复用。"""
-    purge_scene()
+def build(purge=True):
+    """生成整器。返回对象字典，供 verify.py 与后续阶段（合束器/组合体/编队）复用。
+
+    ``purge=False`` 时**不清场景**——供上层场景（formation.py）在同一次运行里连续
+    摆放多台器，从而**逐字复用**本函数而不必复制单体代码。
+    """
+    if purge:
+        purge_scene()
     objs = {}
     objs["bus"] = build_bus()
     objs["tube"] = build_tube()
     for g in build_gimbals():
-        objs[g.name] = g
+        objs[g.name.split(".")[0]] = g      # 按基名记账：多次调用时 Blender 会加 .001
     for t in build_tanks():
-        objs[t.name] = t
+        objs[t.name.split(".")[0]] = t
     panels, centers = build_panels()
     for p in panels:
-        objs[p.name] = p
+        objs[p.name.split(".")[0]] = p
     objs["window_out"] = build_window()
     report(objs, centers)
     return objs
