@@ -44,6 +44,13 @@ RERUN_RE = re.compile(
 )
 PAGE_RE = re.compile(r"\[(\d+)(?:[^\]\d][^\]]*)?\]")
 
+# 一条消息归给哪个出页标记。TeX 是**装箱**时报 overfull／underfull 的，``[n]`` 由随后的
+# ``\shipout`` 打出，所以消息写在它所属那一页的标记**之前**——``after`` 取"之后最近的
+# 标记"，这才是装帧的真相。``before`` 取"之前最近的标记"，是成书构建器沿用至今的口径；
+# 幻灯片的 ``build`` 用 ``after``（见 :func:`primer.slides.build.read_log_findings`）。
+PAGE_BEFORE = "before"
+PAGE_AFTER = "after"
+
 
 def unwrap(log: str) -> str:
     """把日志按 ``max_print_line`` 折出来的续行接回去。"""
@@ -60,10 +67,18 @@ def unwrap(log: str) -> str:
     return "\n".join(joined)
 
 
-def parse_log(text: str) -> List[Finding]:
-    """解析日志文本，返回发现列表。"""
+def parse_log(text: str, pages: str = PAGE_BEFORE) -> List[Finding]:
+    """解析日志文本，返回发现列表。
+
+    ``pages`` 决定一条消息归给哪个出页标记：:data:`PAGE_BEFORE` 取消息之前最近的标记，
+    :data:`PAGE_AFTER` 取之后最近的标记。两者相差一页的情形出现在**帧即页**的 beamer
+    幻灯片上——帧的盒子在 ``\\end{frame}`` 装箱时报出来，``[n]`` 之后才打出，所以那个
+    消息属于**后**一页。
+    """
+    if pages not in (PAGE_BEFORE, PAGE_AFTER):
+        raise ValueError(f"unknown page attribution: {pages!r}")
     log = unwrap(text)
-    pages = [(matched.start(), int(matched.group(1))) for matched in PAGE_RE.finditer(log)]
+    pages_at = [(matched.start(), int(matched.group(1))) for matched in PAGE_RE.finditer(log)]
     findings: List[Finding] = []
 
     for matched in OVERFULL_RE.finditer(log):
@@ -75,7 +90,7 @@ def parse_log(text: str) -> List[Finding]:
                 code=code,
                 severity="warning",
                 message=f"{axis}box {kind.lower()} ({amount})",
-                location=f"page {_page_at(pages, matched.start())}, line(s) {lines}",
+                location=f"page {_page_at(pages_at, matched.start(), pages)}, line(s) {lines}",
             )
         )
 
@@ -86,7 +101,7 @@ def parse_log(text: str) -> List[Finding]:
                 code="missing-character",
                 severity="error",
                 message=f"no glyph for {char!r} in font {font}",
-                location=f"page {_page_at(pages, matched.start())}",
+                location=f"page {_page_at(pages_at, matched.start(), pages)}",
             )
         )
 
@@ -135,7 +150,7 @@ def parse_log(text: str) -> List[Finding]:
                 code="missing-file",
                 severity="error",
                 message=f"file {matched.group(1)!r} was not found",
-                location=f"page {_page_at(pages, matched.start())}",
+                location=f"page {_page_at(pages_at, matched.start(), pages)}",
             )
         )
 
@@ -151,11 +166,18 @@ def parse_log(text: str) -> List[Finding]:
     return findings
 
 
-def _page_at(pages: Sequence[Tuple[int, int]], position: int) -> int:
-    """匹配位置之前最近的出页标记所给的页码（找不到时返回 0）。"""
-    current = 0
+def _page_at(pages: Sequence[Tuple[int, int]], position: int, mode: str) -> int:
+    """把一条消息的位置映射到页码。
+
+    ``mode`` 为 :data:`PAGE_BEFORE` 时取位置**之前**最近的出页标记（成书的既有口径）；
+    为 :data:`PAGE_AFTER` 时取位置**之后**最近的标记——装帧的真相，见 :func:`parse_log`。
+    之前一个标记都没有、或之后一个都没有时，退回能找到的那一个（都没有则 0）。
+    """
+    seen = 0
     for offset, page in pages:
         if offset > position:
+            if mode == PAGE_AFTER:
+                return page
             break
-        current = page
-    return current
+        seen = page
+    return seen

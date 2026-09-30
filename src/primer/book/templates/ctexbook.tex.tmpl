@@ -94,6 +94,34 @@
 \setlength{\parskip}{@par_skip}
 @size_ladder
 
+% 竖向弹性：book 类双面默认 flushbottom，版心必须填满，短页的余量只能由页内
+% 可拉伸的竖直胶吃掉。而一页里唯一带拉伸分量的胶就是节标题的 afterskip
+% （ctex-scheme-chinese-book 给的 section/afterskip = 2.3ex plus .2ex；章题
+% afterskip 是刚性 40pt，动不了），于是整页余量全压到节标题后面，把标题与正文
+% 撕开：第 57 页实测 118pt，正好是该页余量 95pt 加上自然间距 23pt。改用
+% raggedbottom 后，余量由页底那段 fil 胶吸收，标题后只留自然间距；代价是页底
+% 留白不再逐页恒定（该书页底留白中位由 16pt 变成 28pt），短页在末行之后提前收尾。
+\raggedbottom
+
+% ---------------------------------------------------------------- 中文孤字控制
+% 一段的最后一行只剩一个汉字（孤字／widow）在中文排版里是要避免的坏行：句子被切成
+% 一条断尾，读起来像排版事故。xeCJK 的 CheckSingle 会在段末三个汉字之间插入
+% WidowPenalty（10000 即禁止在那里断行），从而整段重排、不许末行落单。
+%
+% 这个机制靠"看见"段末或行末才起作用，而那些位置要认得出来。两种边界都得声明：
+%
+%   NewLineCS+={\\}           行末：表格 p{}/Y 列最后一格的段落以行末的 \\ 收尾。
+%   NewLineCS+={\primercellend}  行内：非末列的格子以对齐符 & 收尾，而 & 是 catcode 4，
+%                             既不是控制序列也不是"other"，CheckSingle 根本不认它；
+%                             所以发射器（tex.CELL_BOUNDARY）在每个 Y 列格子末尾补一个
+%                             记号，这里把它当作行末声明进来。
+%
+% 只声明 \\ 时，孤字控制只对每行的最后一格生效，行内各格全部漏掉（实测：两列
+% 表格首格窄列，末行仍是一个孤零零的"产"）。\primercellend 本身展开为空，不动段落
+% 结构、也不改行高。代价：重排后少数字行的字间距会略松一点。
+\newcommand{\primercellend}{\relax}
+\xeCJKsetup{CheckSingle=true,WidowPenalty=10000,NewLineCS+={\\},NewLineCS+={\primercellend}}
+
 \renewcommand{\contentsname}{@toc_name}
 \renewcommand{\listfigurename}{@figure_list_name}
 \renewcommand{\listtablename}{@table_list_name}

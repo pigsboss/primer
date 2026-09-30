@@ -75,6 +75,57 @@ def test_missing_character_is_an_error():
     assert is_fatal(finding)
 
 
+# beamer 的日志：一帧一页，帧内溢出在 ``\end{frame}`` 装箱时报出来，而 ``[n]`` 由随后的
+# ``\shipout`` 打出——消息因此写在它所属那一页的标记**之前**。这一段逐字取自一个真编译过
+# 的四帧 xelatex 文档（第二帧里放了一根 400pt 的竖线）。
+BEAMER_LOG = """\
+[1
+
+]
+Overfull \\vbox (160.43008pt too high) detected at line 9
+ []
+
+[2
+
+]
+
+[3
+
+]
+"""
+
+
+def test_a_beamer_frame_overfull_belongs_to_the_page_after_the_marker():
+    """日志行号 9 在一帧即一页的 beamer 里是第 2 页，不是消息之前那个 [1] 的第 1 页。"""
+    finding = next(
+        item
+        for item in logcheck.parse_log(BEAMER_LOG, pages=logcheck.PAGE_AFTER)
+        if item.code == "overfull-vbox"
+    )
+
+    assert "page 2" in finding.location
+    assert "line(s) 9" in finding.location
+    assert finding.severity == "warning"
+
+
+def test_the_default_page_attribution_keeps_the_book_convention():
+    """成书连续正文沿用至今的口径：取消息之前最近的那个标记。"""
+    finding = next(
+        item for item in logcheck.parse_log(BEAMER_LOG) if item.code == "overfull-vbox"
+    )
+
+    assert "page 1" in finding.location
+
+
+def test_parse_log_rejects_an_unknown_page_attribution():
+    try:
+        logcheck.parse_log("", pages="sideways")
+    except ValueError as error:
+        assert "sideways" in str(error)
+    else:  # pragma: no cover - 正常路径下不会走到
+        raise AssertionError("expected ValueError")
+
+
 def test_unwrap_joins_lines_broken_at_the_print_width():
     first = "Overfull \\hbox (1.0pt too wide) in paragraph at lines " + "1--2"
     wrapped = first + " " * (79 - len(first) % 79)

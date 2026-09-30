@@ -367,8 +367,11 @@ class BookBuilder:
             tex.render_title_page(self._book),
             tex.render_foreword(self._front_matter, self.bibliography.max_number),
             tex.render_catalog_pages(),
-            tex.render_appendix_catalog(self._front_matter),
         ]
+        # 附录目录没有任何条目时不发这一页：模板里的 \chapter* 在双面 openright 下
+        # 强制从右页起，空清单会白占一页正文位，还挤出一张空白页。
+        if self._front_matter.appendix_catalog:
+            doc.append(tex.render_appendix_catalog(self._front_matter))
         appendix_started = False
         short_marks: List[str] = []
         # 章号起点：章号由 LaTeX 连续自动编号，这里只为量"章标题一行的容量"时

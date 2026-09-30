@@ -141,18 +141,33 @@ def replace_unicode(text: str) -> str:
     return text
 
 
-def render_inline(text: str) -> str:
+# 链接的两档渲染。成书把 ``[标签](url)`` 排成 ``标签\footnote{\texttt{url}}``——纸面上
+# 脚注是标准做法；幻灯片的版面上，一行 URL 脚注既多余又吃掉版面，所以那一档只留标签文字，
+# 丢弃的目标由调用方记进发现（不静默丢信息）。
+LINK_FOOTNOTE = "footnote"
+LINK_LABEL = "label"
+
+
+def render_inline(
+    text: str,
+    links: str = LINK_FOOTNOTE,
+    dropped_links: Optional[List[Tuple[str, str]]] = None,
+) -> str:
     """行内 markdown → LaTeX。
 
     先把链接、行内代码、行内公式换成哨兵字符（避免其内容被后续转义与强调处理
-    波及），再转义、替换 unicode、处理强调，最后还原三批哨兵。链接渲染为
-    ``\\footnote{\\texttt{url}}``。
+    波及），再转义、替换 unicode、处理强调，最后还原三批哨兵。``links`` 选
+    :data:`LINK_FOOTNOTE` 时链接渲染为 ``\\footnote{\\texttt{url}}``（成书）；
+    选 :data:`LINK_LABEL` 时只发射标签文字，目标追加进 ``dropped_links``（幻灯片）。
     """
-    links: List[tuple] = []
+    if links not in (LINK_FOOTNOTE, LINK_LABEL):
+        raise ValueError(f"unknown link rendering mode: {links!r}")
+    mode = links
+    found: List[tuple] = []
 
     def stash_link(matched: re.Match) -> str:
-        links.append((matched.group(1), matched.group(2)))
-        return f"\x00{len(links) - 1}\x00"
+        found.append((matched.group(1), matched.group(2)))
+        return f"\x00{len(found) - 1}\x00"
 
     text = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)(?:\s+\"[^\"]*\")?\)", stash_link, text)
     text = re.sub(
@@ -188,8 +203,13 @@ def render_inline(text: str) -> str:
     text = re.sub("\x02(\\d+)\x02", lambda m: "$" + maths[int(m.group(1))] + "$", text)
 
     def restore_link(matched: re.Match) -> str:
-        label, url = links[int(matched.group(1))]
-        return break_long_runs(escape_latex(label)) + r"\footnote{" + render_url(url) + "}"
+        label, url = found[int(matched.group(1))]
+        rendered = break_long_runs(escape_latex(label))
+        if mode == LINK_LABEL:
+            if dropped_links is not None:
+                dropped_links.append((label, url))
+            return rendered
+        return rendered + r"\footnote{" + render_url(url) + "}"
 
     text = re.sub("\x00(\\d+)\x00", restore_link, text)
     text = re.sub("\x01(\\d+)\x01", lambda m: r"\texttt{" + escape_latex(codes[int(m.group(1))]) + "}", text)
@@ -241,13 +261,26 @@ def render_table(
     return out
 
 
+# 单元格末尾的界线记号，供 xeCJK 的孤字控制（CheckSingle）认出行末位置。
+#
+# CheckSingle 只在能"看见"段末/行末时，才在段末三字之间插 WidowPenalty。行内非末列
+# 的单元格以对齐符 & 收尾，而 & 是 catcode 4、CheckSingle 不把它当界线；末列以 \\
+# 收尾，\\ 可以经 NewLineCS 声明（见导言区模板），但行内的 & 不行。于是发射器在
+# 每个 Y 列的单元格末尾放一个记号，导言区把记号名加进 NewLineCS——孤字控制这才覆盖
+# 到表格的每一个单元格。记号展开为空（见模板里的 \primercellend 定义），不动段落
+# 结构，也不改行高（实测：p{1.2cm}、10 字单元格，加与不加重排结果与行位置逐字相同）。
+CELL_BOUNDARY = r"\primercellend"
+
+
 def _xltabular(
     rows: Sequence[Sequence[str]], caption: str, label: Optional[str], layout, columns: int
 ) -> List[str]:
     weights = [width * columns for width in layout.columns]
     spec = "@{}" + "".join(rf"Y{{{weight:.4f}}}" for weight in weights) + "@{}"
-    header = " & ".join(_cell(cell) for cell in rows[0]) + r" \\"
-    body = [" & ".join(_cell(cell) for cell in row) + r" \\" for row in rows[1:]]
+    header = " & ".join(_cell(cell) + CELL_BOUNDARY for cell in rows[0]) + r" \\"
+    body = [
+        " & ".join(_cell(cell) + CELL_BOUNDARY for cell in row) + r" \\" for row in rows[1:]
+    ]
 
     out = [r"\begingroup\zihao{" + layout.font_code + "}", r"\begin{xltabular}{\linewidth}{" + spec + "}"]
     if caption:

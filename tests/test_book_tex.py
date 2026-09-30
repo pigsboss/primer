@@ -44,6 +44,33 @@ def test_inline_renders_links_as_breakable_typewriter_footnotes():
     )
 
 
+def test_inline_can_drop_the_link_target_for_slides():
+    """幻灯片一档：只发射标签文字；丢弃的目标记进调用方给的账本，不静默丢。"""
+    dropped = []
+
+    rendered = tex.render_inline(
+        "见 [站点](https://example.org/a_b) 与 [报告](参考资料/x.pdf)",
+        links=tex.LINK_LABEL,
+        dropped_links=dropped,
+    )
+
+    assert rendered == r"见 站点 与 报告"
+    assert r"\footnote" not in rendered
+    assert dropped == [
+        ("站点", "https://example.org/a_b"),
+        ("报告", "参考资料/x.pdf"),
+    ]
+
+
+def test_inline_rejects_an_unknown_link_mode():
+    try:
+        tex.render_inline("x", links="sideways")
+    except ValueError as error:
+        assert "sideways" in str(error)
+    else:  # pragma: no cover - 正常路径下不会走到
+        raise AssertionError("expected ValueError")
+
+
 def test_inline_escapes_url_characters_that_would_break_the_footnote():
     rendered = tex.render_inline("[报告](https://x.test/a%20b#c)")
 
@@ -233,7 +260,8 @@ def test_renders_table_as_xltabular_with_caption_and_label():
     assert rendered[1].startswith(r"\begin{xltabular}{\linewidth}{@{}Y{")
     assert rendered[2] == r"\caption{示例表}\label{tab:1-1}\\"
     assert rendered[3] == r"\toprule"
-    assert rendered[4] == r"列一 & 列二 \\"
+    # 每格末尾带界线记号：行内格子以 & 收尾，xeCJK 认不出那是行末，孤字控制要靠它
+    assert rendered[4] == r"列一\primercellend & 列二\primercellend \\"
     assert rendered[5] == r"\midrule"
     assert rendered[6] == r"\endfirsthead"
     assert rendered[7] == r"\multicolumn{2}{r}{（续）}\\"
@@ -244,6 +272,16 @@ def test_renders_table_as_xltabular_with_caption_and_label():
     assert len(weights) == 2
     assert abs(sum(weights) - 2) < 1e-6
     assert [finding.code for finding in findings].count("table-layout") == 1
+
+
+def test_scaled_tables_do_not_carry_the_cell_boundary_marker():
+    """整表缩小的 tabular 用 l 列、不换行，也就没有孤字，不该带记号。"""
+    wide = "|" + "|".join(["很长的列标题文字"] * 9) + "|"
+    separator = "|" + "|".join(["---"] * 9) + "|"
+    rendered = render([wide, separator, wide])
+
+    assert any(r"\begin{adjustbox}" in line for line in rendered)
+    assert r"\primercellend" not in "\n".join(rendered)
 
 
 def test_uncaptioned_table_gets_no_caption_or_label():
@@ -469,6 +507,29 @@ def test_preamble_wires_fonts_size_ladder_and_graphics_path():
     assert r"\renewcommand\small{\fontsize{12.6pt}{15.75pt}\selectfont}" in rendered
     assert r"\newcolumntype{Y}[1]" in rendered
     assert r"\setcounter{tocdepth}{1}" in rendered
+
+
+def test_preamble_ragged_bottom_keeps_slack_out_of_heading_skips():
+    rendered = preamble.render_preamble(Fonts(), Typography(), "成果文件/")
+
+    assert r"\raggedbottom" in rendered
+    assert r"\flushbottom" not in rendered
+
+
+def test_preamble_turns_on_xecjk_widow_control_inside_table_cells():
+    r"""中文孤字控制：末行只剩一个汉字时整段重排。
+
+    两种行末都要声明：``\\``（行末格子）与 ``\primercellend``（行内格子的界线记号，
+    由发射器补在每个 Y 列格子末尾）。只给 ``\\`` 时行内各格漏掉——``&`` 是 catcode 4，
+    CheckSingle 认不出来（实测：两列窄表格，首格末行仍是一个孤字）。
+    """
+    rendered = preamble.render_preamble(Fonts(), Typography(), "成果文件/")
+
+    assert r"\newcommand{\primercellend}{\relax}" in rendered
+    assert (
+        r"\xeCJKsetup{CheckSingle=true,WidowPenalty=10000,"
+        r"NewLineCS+={\\},NewLineCS+={\primercellend}}"
+    ) in rendered
 
 
 def test_preamble_accepts_point_sizes_and_zihao_codes():

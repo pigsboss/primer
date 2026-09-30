@@ -50,6 +50,31 @@ def test_tex_only_build_writes_the_tex_makefile_and_findings(tmp_path):
     assert [finding for finding in result.findings if finding.severity != "info"] == []
 
 
+def test_an_empty_appendix_catalog_emits_no_catalog_page(tmp_path):
+    """附录目录没有条目时整页不发。
+
+    模板里的 ``\\chapter*`` 在双面 openright 下强制从右页起：空清单会白占一页正文
+    位、还挤出一张空白页（本书实测 215→213 页）。附录本身不受影响——目录页只借
+    ``\\pageref`` 引正文的 ``\\label{appA}``，删掉目录页不动附录。
+    """
+    without = MANIFEST.replace(
+        "  appendix_catalog:\n    - title: 附录 A　示例附录\n      label: appA\n", ""
+    )
+    assert "appendix_catalog" not in without
+
+    filled = BookBuilder(load_manifest(tiny_book(tmp_path / "filled")), tex_only=True).build()
+    empty = BookBuilder(load_manifest(tiny_book(tmp_path / "empty", without)), tex_only=True).build()
+
+    filled_tex = filled.tex.read_text(encoding="utf-8")
+    empty_tex = empty.tex.read_text(encoding="utf-8")
+
+    assert r"\chapter*{附录目录}" in filled_tex
+    assert r"\dotfill \pageref{appA}" in filled_tex
+    assert r"\chapter*{附录目录}" not in empty_tex
+    assert r"\pageref{appA}" not in empty_tex
+    assert r"\label{appA}" in empty_tex
+
+
 def test_build_writes_a_machine_readable_findings_report(tmp_path):
     manifest = load_manifest(tiny_book(tmp_path))
 
