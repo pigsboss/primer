@@ -2,13 +2,15 @@
 """verify_assembly.py — 三器组合体装配的自动验收（在 assembly.py 之后运行）。
 
 用法：blender --background --python verify_assembly.py，日志写 out/assembly/verify_log.txt。
-判据逐条对应《阶段三_验收清单》（2026-09-30）D1–D12，**不自行增删**。
+判据**逐条照抄**《验收反馈 03》（2026-09-30）§三 D1–D12，不得自增删。
 
-两处按字面会误判、已在代码里显式写明读法（并在交付说明中提请 kimi work 确认）：
-  * D4 与 D5 需同时成立 ⇒ 载荷舱露高须 ≥0.60 m（combiner.MODULE_H 已由 0.54 调到 0.70）；
-  * D7 按字面会把乳白储箱判 FAIL，故把 `tank` 列入排除项（D7 的意图是"不得有外露深灰梁体"）；
-  * D9 "储箱 y 符号与所属舱相反（朝内）"取**相对舱心的偏移方向**读法——按绝对坐标符号读
-    会要求储箱距舱心 1.74 m，几何上不可能。
+三处按字面会误判、已在代码里写明读法（并在交付说明中回报，不擅自改判据文字）：
+  * D1 "平板类对象" → 除豁免件（筒/载荷舱/机构/翼/窗口/储箱）外的结构件，若网格真实
+    包围盒最小边 ≤0.08 m 即视为薄板；另按对象名子串 deck/beam/truss/plate 直接判违规。
+  * D4 "平台舱顶面上方对象清单恰好为 {集光器A, 集光器B, 载荷舱}" → 按**坐在该面上**判定
+    （对象包围盒底面落在面高 ±0.05 m 内），按所属件归并。否则合束器那副展开翼（其几何
+    本就在平台舱之上）会被误判，而规格 §二.4 明确要求它保持展开。
+  * D7 "±X 侧面" → 平台舱为矩形，集光器舱为梯形，故用顶点插值求该 y 处的面半宽，不假定面是平的。
 """
 import math
 import os
@@ -26,6 +28,8 @@ os.makedirs(OUT, exist_ok=True)
 LOG = os.path.join(OUT, "verify_log.txt")
 
 ENV_R, ENV_H = 1.825, 4.610
+EXEMPT = ("tube", "module", "gimbal", "recv", "aux", "panel", "window", "tank")
+FORBIDDEN_NAME = ("deck", "beam", "truss", "plate")
 results = []
 
 
@@ -54,7 +58,7 @@ def vdims(objs):
     return [hi[i] - lo[i] for i in range(3)]
 
 
-def center(o):
+def vcenter(o):
     lo, hi = vbounds([o])
     return [(lo[i] + hi[i]) / 2 for i in range(3)]
 
@@ -74,13 +78,32 @@ def max_color(obj):
     return None
 
 
+def owner(name):
+    return name.split("_")[0]
+
+
+def face_half_width(bus, y):
+    """梯形舱在该 y 处的 ±X 面半宽（顶点插值，对 180° 旋转也成立）。"""
+    lo, hi = vbounds([bus])
+    ylo, yhi = lo[1], hi[1]
+    span = yhi - ylo
+    if span <= 0:
+        return max(hi[0] - lo[0], 0) / 2
+    t = (y - ylo) / span
+    # 两端各自的 x 半宽
+    xs_lo = [abs(v.x) for v in wverts(bus) if abs(v.y - ylo) < 0.03]
+    xs_hi = [abs(v.x) for v in wverts(bus) if abs(v.y - yhi) < 0.03]
+    w_lo = max(xs_lo) if xs_lo else 0.0
+    w_hi = max(xs_hi) if xs_hi else 0.0
+    return w_lo + (w_hi - w_lo) * t
+
+
 def png_size(path):
     with open(path, "rb") as f:
         head = f.read(24)
     if head[:8] != b"\x89PNG\r\n\x1a\n":
         return (0, 0)
-    w, h = struct.unpack(">II", head[16:24])
-    return (w, h)
+    return struct.unpack(">II", head[16:24])
 
 
 def main():
@@ -92,131 +115,142 @@ def main():
         traceback.print_exc()
         check("EX", "assembly 导入/构建异常", False, traceback.format_exc(limit=3))
 
-    deck = find("deck")
-    buses = {tag: find("%s_bus" % tag) for tag in ("colA", "colB", "cmblow")}
-    tubes = {tag: find("%s_tube" % tag) for tag in ("colA", "colB")}
+    meshes = [o for o in bpy.data.objects if o.type == "MESH"]
+    bay = find("bay")
+    buses = {t: find("%s_bus" % t) for t in ("colA", "colB")}
+    tubes = {t: find("%s_tube" % t) for t in ("colA", "colB")}
     module = find("cmbmod_module")
 
-    # ---- D1 对象齐备 ----
-    need_col = ("bus", "tube", "panel_X1", "panel_X2", "panel_-X1", "panel_-X2", "window_out",
-                "tank_01", "tank_02", "gimbal_01", "gimbal_02", "gimbal_03")
-    miss = [f"{t}_{n}" for t in ("colA", "colB") for n in need_col if not find(f"{t}_{n}")]
-    cmb_need = ("cmblow_bus", "cmblow_panel_X1", "cmblow_panel_X2", "cmblow_panel_-X1",
-                "cmblow_panel_-X2", "cmblow_tank_01", "cmblow_tank_02",
-                "cmbmod_module", "cmbmod_recv_01", "cmbmod_recv_02")
-    miss += [n for n in cmb_need if not find(n)]
-    check("D1", "对象齐备（集光器×2、合束器、共机架 deck）",
-          bool(deck) and not miss, f"缺件={miss or '无'}")
+    # ---- D1 对象齐备且无独立连接件 ----
+    need = ("bus", "tube", "panel_X1", "panel_X2", "panel_-X1", "panel_-X2", "window_out",
+            "tank_01", "tank_02", "gimbal_01", "gimbal_02", "gimbal_03")
+    miss = [f"{t}_{n}" for t in ("colA", "colB") for n in need if not find(f"{t}_{n}")]
+    missing_cmb = [n for n in ("bay", "cmbmod_module", "cmbmod_recv_01", "cmbmod_recv_02")
+                   if not find(n)]
+    by_name = [o.name for o in meshes if any(k in o.name.lower() for k in FORBIDDEN_NAME)]
+    struct = [o for o in meshes if not any(k in o.name for k in EXEMPT)]
+    thin = [(o.name, round(min(vdims([o])), 3)) for o in struct if min(vdims([o])) <= 0.08]
+    check("D1", "对象齐备且无独立连接件（deck/beam/truss/plate）",
+          not miss and not missing_cmb and not by_name and not thin,
+          f"缺件={miss + missing_cmb or '无'}；按名命中={by_name or '无'}；薄板类结构件={thin or '无'}")
 
-    if not (deck and all(buses.values()) and all(tubes.values()) and module):
+    if not (bay and all(buses.values()) and all(tubes.values()) and module):
         raise SystemExit("关键对象缺失，终止后续检查")
 
-    dlo, dhi = vbounds([deck])
-    bus_v = {t: (vbounds([b]), vbounds([b])) for t, b in buses.items()}
-    bus_lo = {t: vbounds([b])[0] for t, b in buses.items()}
-    bus_hi = {t: vbounds([b])[1] for t, b in buses.items()}
+    bay_lo, bay_hi = vbounds([bay])
 
     # ---- D2 基线 ----
-    ya, yb = center(tubes["colA"])[1], center(tubes["colB"])[1]
+    ya, yb = vcenter(tubes["colA"])[1], vcenter(tubes["colB"])[1]
     check("D2", "基线（两 tube 轴线 y 之差）∈ [2.3,2.6] m", 2.3 <= abs(ya - yb) <= 2.6,
           f"baseline={abs(ya - yb):.3f} m")
 
     # ---- D3 对称居中 ----
-    mc = center(module)
+    mc = vcenter(module)
     check("D3", "对称居中：|y_A+y_B|≤0.1；载荷舱 |y|≤0.3、|x|≤0.15",
           abs(ya + yb) <= 0.1 and abs(mc[1]) <= 0.3 and abs(mc[0]) <= 0.15,
           f"y_A+y_B={ya + yb:+.3f}；载荷舱 y={mc[1]:+.3f}, x={mc[0]:+.3f}")
 
-    # ---- D4 支撑关系（两台集光器舱、载荷舱都落在甲板上；合束器舱顶贴甲板底面）----
-    g_col = [bus_lo[t][2] - dhi[2] for t in ("colA", "colB")]
-    g_mod = vbounds([module])[0][2] - dhi[2]
-    g_low = bus_hi["cmblow"][2] - dlo[2]
-    ok = all(-0.05 <= g <= 0.05 for g in g_col) and -0.05 <= g_mod <= 0.05 and -0.05 <= g_low <= 0.05
-    check("D4", "支撑关系：集光器舱底/载荷舱底贴甲板顶面，合束器舱顶贴甲板底面", ok,
-          f"两集光器舱底−甲板顶={[round(g, 3) for g in g_col]}；载荷舱={g_mod:+.3f}；合束器舱顶−甲板底={g_low:+.3f}")
+    # ---- D4 两层支撑 ----
+    gaps = {t: vbounds([buses[t]])[0][2] - bay_hi[2] for t in ("colA", "colB")}
+    g_mod = vbounds([module])[0][2] - bay_hi[2]
+    ok_gap = all(-0.05 <= g <= 0.05 for g in gaps.values()) and -0.05 <= g_mod <= 0.05
+    # 坐在平台舱顶面上的对象（按其所属件归并）
+    sitters = sorted({owner(o.name) for o in meshes
+                      if o is not bay and abs(vbounds([o])[0][2] - bay_hi[2]) <= 0.05})
+    check("D4", "两层支撑：两集光器舱底与载荷舱底直接贴合平台舱顶面；面上对象恰为 {集光器A,B,载荷舱}",
+          ok_gap and sitters == ["cmbmod", "colA", "colB"],
+          f"间隙={[round(g, 3) for g in gaps.values()]}+载荷舱{g_mod:+.3f}；面上件={sitters}")
 
-    # ---- D5 上层同高 ----
-    dh = abs(vbounds([module])[1][2] - max(bus_hi[t][2] for t in ("colA", "colB")))
+    # ---- D5 同层成排 ----
+    dh = abs(vbounds([module])[1][2] - max(vbounds([buses[t]])[1][2] for t in ("colA", "colB")))
     check("D5", "载荷舱顶面与集光器舱顶面高差 ≤0.3 m（顶视三者同层成排）", dh <= 0.3, f"高差={dh:.3f} m")
 
-    # ---- D6 共机架 ----
-    cdk = max_color(deck)
-    deck_ok = cdk and cdk[0] > cdk[1] > cdk[2]
-    span_ok = (dhi[1] - dlo[1]) >= abs(ya - yb) + 0.9
-    inside = all(dlo[0] <= bus_lo[t][0] and bus_hi[t][0] <= dhi[0]
-                 and dlo[1] <= bus_lo[t][1] and bus_hi[t][1] <= dhi[1] for t in ("colA", "colB"))
-    check("D6", "共机架：deck 金色、Y 向跨度≥基线+0.9、两台集光器舱底面落在甲板顶面范围内",
-          bool(deck_ok and span_ok and inside),
-          f"deck 色={cdk}；Y 跨度={dhi[1] - dlo[1]:.2f}（需≥{abs(ya - yb) + 0.9:.2f}）；投影内={inside}")
-
-    # ---- D7 无外露裸结构（除功用件外，结构件一律金色）----
-    # 读法：tank 亦列入排除项——D10 规定储箱为乳白，按字面 D7 会误判（见文件头说明）
-    excl = ("tube", "module", "gimbal", "recv", "aux", "panel", "window", "tank")
+    # ---- D6 金色包覆 ----
     bad = []
-    for o in bpy.data.objects:
-        if o.type != "MESH" or any(k in o.name for k in excl):
-            continue
+    for o in struct:
         c = max_color(o)
         if not (c and c[0] > c[1] > c[2]):
             bad.append((o.name, c))
-    check("D7", "无外露裸结构：除筒/载荷舱/机构/翼/窗口/储箱外，结构件一律金色", not bad,
-          f"非金色结构件={bad or '无'}")
+    check("D6", "金色包覆：除豁免件外一切可见结构件金色 MLI", not bad, f"非金色结构件={bad or '无'}")
 
-    # ---- D8 太阳翼展开 ----
-    allm = [o for o in bpy.data.objects if o.type == "MESH"]
-    lo, hi = vbounds(allm)
+    # ---- D7 集光器翼折叠 ----
+    detail, ok = [], True
     bus_w = max(vdims([buses["colA"]])[0], vdims([buses["colA"]])[1])
-    check("D8", "三器太阳翼均展开（全组合体 X 跨度 ≥3×舱宽）",
-          (hi[0] - lo[0]) >= 3 * bus_w, f"X 跨度={hi[0] - lo[0]:.3f} m，3×舱宽={3 * bus_w:.3f}")
+    for t in ("colA", "colB"):
+        bus = buses[t]
+        blo, bhi = vbounds([bus])
+        for k in ("X1", "X2", "-X1", "-X2"):
+            p = find("%s_panel_%s" % (t, k))
+            plo, phi = vbounds([p])
+            dims = [phi[i] - plo[i] for i in range(3)]
+            inner = min(abs(plo[0]), abs(phi[0]))
+            gap = inner - face_half_width(bus, (plo[1] + phi[1]) / 2)
+            proj_ok = (phi[1] - plo[1]) <= 1.1 * (bhi[1] - blo[1]) and \
+                      (phi[2] - plo[2]) <= 1.1 * (bhi[2] - blo[2])
+            good = dims[0] <= 0.08 and abs(gap) <= 0.10 and proj_ok
+            ok = ok and good
+            detail.append(f"{t}{k}:厚{dims[0]:.3f}/间隙{gap:+.3f}/投影{'ok' if proj_ok else 'BAD'}")
+    check("D7", "集光器翼折叠：翼面与舱 ±X 侧面平行贴合（间隙≤0.10），投影不超舱体 1.1 倍",
+          ok, "；".join(detail))
+
+    # ---- D8 合束器翼展开 ----
+    cmb_panels = [find("cmb_panel_%s" % k) for k in ("X1", "X2", "-X1", "-X2")]
+    cmb_panels = [p for p in cmb_panels if p]
+    if len(cmb_panels) == 4:
+        lo, hi = vbounds(cmb_panels)
+        vertical = all(vdims([p])[1] <= 0.08 and vdims([p])[2] >= 0.5 for p in cmb_panels)
+        xs = [vcenter(p)[0] for p in cmb_panels]
+        check("D8", "合束器翼展开：±X 两翼、板面竖立（弦向沿 Z）、X 跨度 ≥3×舱宽",
+              vertical and hi[0] - lo[0] >= 3 * bus_w and min(xs) < 0 < max(xs),
+              f"X 跨度={hi[0] - lo[0]:.3f}（需≥{3 * bus_w:.2f}），竖立={vertical}，x={[round(v, 2) for v in xs]}")
+    else:
+        check("D8", "合束器翼展开", False, f"合束器翼面不足 4 块：{len(cmb_panels)}")
 
     # ---- D9 储箱朝向 ----
     detail, ok = [], True
     for t in ("colA", "colB"):
-        by = center(buses[t])[1]
+        by = vcenter(buses[t])[1]
         for k in (1, 2):
-            tk = find("%s_tank_%02d" % (t, k))
-            ty = center(tk)[1]
-            # "符号相反（朝内）"取**相对舱心的偏移方向**：储箱须位于舱心与组合体原点之间。
-            # 按绝对坐标符号读则要求储箱距舱心 1.74 m，几何上不可能。
+            ty = vcenter(find("%s_tank_%02d" % (t, k)))[1]
             off = ty - by
             good = (off > 0) != (by > 0) and abs(off) < 1.0
             ok = ok and good
-            detail.append(f"{t}{k}: tank_y={ty:+.2f}/bus_y={by:+.2f}/偏移={off:+.2f}")
+            detail.append(f"{t}{k}: 偏移{off:+.2f}")
     for k in (1, 2):
-        tk = find("cmblow_tank_%02d" % k)
-        tx = center(tk)[0]
-        bw = vdims([buses["cmblow"]])[0] / 2
+        tx = vcenter(find("cmb_tank_%02d" % k))[0]
+        bw = vdims([bay])[0] / 2
         good = abs(abs(tx) - bw) <= 0.15
         ok = ok and good
-        detail.append(f"cmb{k}: |x|={abs(tx):.2f}/半宽={bw:.2f}")
-    check("D9", "储箱朝向：集光器朝内（符号相反）、合束器在 ±X 侧面", ok, "；".join(detail))
+        detail.append(f"bay{k}: |x|={abs(tx):.2f}/半宽{bw:.2f}")
+    check("D9", "储箱朝向：集光器朝内（相对舱心偏移指向合束器）、合束器在 ±X 侧面", ok,
+          "；".join(detail))
 
     # ---- D10 材质色 ----
     cb, ct, cm = max_color(buses["colA"]), max_color(tubes["colA"]), max_color(module)
-    ck, cp = max_color(find("colA_tank_01")), max_color(find("colA_panel_X1"))
+    ck, cp = max_color(find("colA_tank_01")), max_color(find("cmb_panel_X1"))
     ok = (cb and cb[0] > cb[1] > cb[2]) and (ct and all(v < 0.1 for v in ct)) \
         and (cm and all(v < 0.35 for v in cm)) and (ck and all(v > 0.8 for v in ck)) \
         and (cp and cp[2] > cp[0])
     check("D10", "材质色：舱/架金、筒与载荷舱近黑、储箱乳白、翼蓝", bool(ok),
           f"bus={cb}, tube={ct}, module={cm}, tank={ck}, panel={cp}")
 
-    # ---- D11 包络记录 ----
+    # ---- D11 包络 ----
     ymax = 0.0
-    for o in [buses["colA"], buses["colB"], buses["cmblow"], deck]:
+    for o in (buses["colA"], buses["colB"], bay):
         l, h = vbounds([o])
         ymax = max(ymax, abs(l[1]), abs(h[1]))
-    check("D11", "包络记录：三器舱体外缘 max|y|≤1.85 m、总高≤4.61 m",
+    lo, hi = vbounds(meshes)
+    check("D11", "包络：三器舱体外缘 max|y|≤1.85 m、总高≤4.61 m",
           ymax <= 1.85 and (hi[2] - lo[2]) <= ENV_H,
-          f"max|y|={ymax:.3f} / 1.85；总高={hi[2] - lo[2]:.3f} / {ENV_H}")
+          f"max|y|={ymax:.3f}/1.85；总高={hi[2] - lo[2]:.3f}/{ENV_H}")
 
-    # ---- D12 自检渲染 ----
+    # ---- D12 渲染自检 ----
     sizes = {}
     for f in ("side.png", "front.png", "iso.png", "top.png"):
         p = os.path.join(OUT, f)
         sizes[f] = png_size(p) if os.path.exists(p) else (0, 0)
-    check("D12", "out/assembly/ 四视角渲染图 ≥1200×900",
-          all(w >= 1200 and h >= 900 for w, h in sizes.values()),
-          f"{sizes}")
+    check("D12", "out/assembly/ 四视角 PNG ≥1200×900",
+          all(w >= 1200 and h >= 900 for w, h in sizes.values()), f"{sizes}")
 
 
 def report():

@@ -1,18 +1,21 @@
 # -*- coding: utf-8 -*-
-"""觅音计划 2028 干涉探测任务——三器组合体（**在轨组合体测试状态**）装配。
+"""觅音计划 2028 干涉探测任务——三器组合体（在轨组合体测试状态）装配。
 
 用法：
     blender --background --python assembly.py     # 装配 + 四视角渲染到 out/assembly/
 
-依《阶段三_建模规格》（2026-09-30）：
-    * 布局＝**共机架两级堆叠**：下层金色共机架（`deck`）+ 吊在其下中央的合束器平台舱；
-      上层甲板上 集光器B ｜ 合束器载荷舱 ｜ 集光器A 成排，三者在 deck 顶面**同层**。
-    * **太阳翼全部展开**（在轨测试状态；发射收拢状态本阶段不做）。
-    * 一切连接结构**金色 MLI 包覆**，场景中不得出现深灰/黑色独立梁体。
-    * 定长基线取 2.366 m（PPT"~2.5 m"；上限由 Φ3650 包络反算，见《阶段三_交付说明》）。
+依《验收反馈 03》（2026-09-30，取代反馈 02 第 1、2 条与《阶段三_建模规格》§一.2/§二）：
 
-修正记录：上一版把三器一字拉开、用一根外露深灰转接梁承托，且把太阳翼收拢——三处均与
-PPT 文字（"3 个探测器共机架安装"）和渲染图不符，本版按规格重做。
+    * **两层结构**：下层只有合束器平台舱本体（金色大箱，与共机架一体）；两台集光器
+      舱底**直接**落在它顶面，器与箱之间**没有**任何独立平板或梁件。
+    * **集光器太阳翼折叠平贴**各自舱体 ±X 侧面；**只有合束器一副大翼展开**。
+      依据：`refs/frames/opt_f040.png`（正视）、`组合体_整体渲染.png`、`组合体_顶部特写.png`；
+      PPT 第 51 页"2 个集光器与合束器承力筒相连"、第 57 页"3 个探测器共机架安装"。
+    * 一切连接结构金色 MLI 包覆，不得出现外露深灰/黑色独立结构件。
+    * 定长基线 2.366 m（PPT"~2.5 m"，上限由 Φ3650 包络反算）。
+
+修正记录：上一版做成 deck 平板＋吊挂平台舱的三层结构，且把集光器翼做成展开——两处均与
+参考图不符，本版按反馈 03 重做。
 """
 import math
 import os
@@ -31,23 +34,26 @@ import combiner as M
 OUT_DIR = os.path.join(HERE, "out", "assembly")
 
 # ============================================================ 参数区
-# ---- 共机架（deck）：金色箱体，顶面即上层甲板 ----
-DECK_W = 1.24          # X 向宽（略宽于舱，保证两台集光器舱底面落在甲板范围内）
-DECK_L = 3.60          # Y 向长（≥ 基线 + 0.9 m）
-DECK_T = 0.40          # Z 向厚（规格 0.3–0.5）
-DECK_BEVEL = 0.06      # 倒角：同时把四角收进 Φ3650 包络圈内
-DECK_TOP = 0.0         # 甲板顶面取 z=0，其余构件以此为基准
+# ---- 合束器平台舱（＝共机架本体，下层唯一实体）----
+# 尺寸取反馈 02 规格 §一.2 的共机架值：Y ≈ 基线＋集光器舱长边，X ≈ 1.2，Z 0.3–0.5（取上沿）。
+# 平面取矩形——规格未规定形状，矩形最不易被误认成平板/梁件。
+BAY_W = 1.24
+BAY_L = 3.60
+BAY_T = 0.50
+BAY_BEVEL = 0.06
+BAY_TOP = 0.0          # 顶面取 z=0，其余构件以此为基准
 
-# ---- 基线：PPT"~2.5 m"；上限由包络反算（短边朝外时舱角须落在 Φ3650 圈内）----
-ENV_R = 1.825
+ENV_R = 1.825          # 发射包络 Φ3650 半径
 ENV_H = 4.610
-BASELINE = 2.366
+BASELINE = 2.366       # 两镜筒轴距（D2 ∈ [2.3,2.6]）
 
-MODULE_EMBED_DECK = 0.020   # 载荷舱底面嵌入甲板的深度（D4 允许 ±0.05）
+MODULE_EMBED = 0.020   # 载荷舱底面嵌入平台舱顶面的深度（D4 允许 ≤0.05）
 
 RES = (1200, 900)
 SAMPLES = 48
 BG = 0.012
+
+EXEMPT = ("tube", "module", "gimbal", "recv", "aux", "panel", "window", "tank")
 
 
 # ============================================================ 工具
@@ -59,11 +65,11 @@ def vbounds(objs):
     return lo, hi
 
 
-def _group(objs, prefix, location, rot_z_deg):
+def _group(objs, prefix, location, rot_z_deg=0.0):
     """把一组新建对象挂到该件的空物体下，改名并整体就位。
 
     **不设** matrix_parent_inverse：它用于"保持子对象原世界位置"，设成 holder 矩阵的逆
-    会把位移与旋转整个抵消（上一版两台集光器因此留在原点）。
+    会把位移与旋转整个抵消。
     """
     holder = bpy.data.objects.new(prefix + "_ROOT", None)
     bpy.context.collection.objects.link(holder)
@@ -79,60 +85,65 @@ def _group(objs, prefix, location, rot_z_deg):
 
 
 # ============================================================ 构件
-def build_deck():
-    """共机架：金色箱体，顶面为上层甲板。"""
-    mat = C.new_material("MAT_DECK_MLI", C.COL_BUS, 0.62, 0.15)
-    bpy.ops.mesh.primitive_cube_add(size=1, location=(0.0, 0.0, DECK_TOP - DECK_T / 2))
-    deck = bpy.context.active_object
-    deck.name = "deck"
-    deck.dimensions = (DECK_W, DECK_L, DECK_T)
+def build_bay():
+    """合束器平台舱＝共机架本体：金色箱体（同族 MLI 材质与褶皱）。"""
+    mat = C.new_material("MAT_BAY_MLI", C.COL_BUS, 0.62, 0.15)
+    bpy.ops.mesh.primitive_cube_add(size=1, location=(0.0, 0.0, BAY_TOP - BAY_T / 2))
+    bay = bpy.context.active_object
+    bay.name = "bay"
+    bay.dimensions = (BAY_W, BAY_L, BAY_T)
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-    deck.data.materials.append(mat)
+    bay.data.materials.append(mat)
     C.add_noise_bump(mat)
-    C.apply_bevel(deck, DECK_BEVEL, 2)
-    return deck
+    C.apply_bevel(bay, BAY_BEVEL, 2)
+    return bay
+
+
+def build_bay_fittings():
+    """平台舱的附件：展开的太阳翼（仅此一副）与 ±X 侧面的储箱。
+
+    太阳翼由 collector.build_panels() 生成（按单体舱的 ±X 斜面定位），这里把它们
+    沿 X 外移到平台舱的 ±X 面上（平台舱宽 1.24 > 单体舱宽 1.20）。
+    """
+    shift = BAY_W / 2 - (C.BUS_W / 2 - C.PANEL_FLUSH)   # 外移量
+    panels, _ = C.build_panels()                        # 展开态
+    for p in panels:
+        p.location.x += math.copysign(shift, p.location.x)
+    tanks = C.build_tanks(face="X±")
+    # 挂在平台舱中层高度：单体构件以舱心为原点，平台舱中层即 BAY_TOP − BAY_T/2
+    _group(panels + tanks, "cmb", (0.0, 0.0, BAY_TOP - BAY_T / 2), 0.0)
+    return panels + tanks
 
 
 def build_collector(prefix, y, rot_z_deg):
-    """一台集光器（在轨状态：太阳翼展开）。"""
+    """一台集光器：舱底直接落在平台舱顶面；**太阳翼折叠平贴**（反馈 03 §二.4）。"""
     objs = [C.build_bus(), C.build_tube()]
     objs += C.build_gimbals()
-    objs += C.build_tanks()                    # 单体构型：两只贴 +Y 长边（朝相邻器）
-    panels, _ = C.build_panels()               # 展开
+    objs += C.build_tanks()                    # 两只贴 +Y 长边（朝相邻器）
+    panels, _ = C.build_panels(stowed=True)    # 折叠平贴 ±X 侧面
     objs += panels
     objs.append(C.build_window())
-    return _group(objs, prefix, (0.0, y, DECK_TOP + C.BUS_H / 2), rot_z_deg)
+    return _group(objs, prefix, (0.0, y, BAY_TOP + C.BUS_H / 2), rot_z_deg)
 
 
-def build_combiner(prefix):
-    """合束器：平台舱吊在甲板下方中央；载荷舱组坐甲板顶面中央。
-
-    规格 §一.4：载荷舱经承力筒与下方平台舱相连，连接段藏在共机架内——故两者在装配里
-    分居甲板两侧，不直接相接。
-    """
-    # 1) 下层：平台舱（含 ±X 储箱、展开的太阳翼）
-    lower = [C.build_bus()]
-    lower += C.build_tanks(face="X±")          # D9：合束器两只储箱在 ±X 侧面外露
-    panels, _ = C.build_panels()               # 展开
-    lower += panels
-    _group(lower, prefix + "low", (0.0, 0.0, DECK_TOP - DECK_T - C.BUS_H / 2), 0.0)
-
-    # 2) 上层：载荷舱 + 接收机构 + 敏感器，底面贴甲板顶面
+def build_module_group():
+    """合束器载荷舱组：坐平台舱顶面中央，与两镜筒同层成排。"""
     grp = [M.build_module()] + M.build_recv() + [M.build_aux()]
     lo, _ = vbounds(grp)
-    dz = (DECK_TOP - MODULE_EMBED_DECK) - lo[2]
-    _group(grp, prefix + "mod", (0.0, 0.0, dz), 0.0)
+    dz = (BAY_TOP - MODULE_EMBED) - lo[2]
+    _group(grp, "cmbmod", (0.0, 0.0, dz), 0.0)
 
 
 def build():
-    """装配三器组合体。返回对象字典。"""
+    """装配三器组合体（两层）。返回对象字典。"""
     C.purge_scene()
-    build_deck()
+    build_bay()
+    build_bay_fittings()
     # 集光器 B（−Y 侧）：长边朝 +Y（朝合束器）→ 不转
     build_collector("colB", -BASELINE / 2, 0.0)
     # 集光器 A（+Y 侧）：长边朝 −Y（朝合束器）→ 绕 Z 转 180°
     build_collector("colA", +BASELINE / 2, 180.0)
-    build_combiner("cmb")
+    build_module_group()
     objs = {o.name: o for o in bpy.context.scene.objects}
     report(objs)
     return objs
@@ -145,17 +156,15 @@ def report(objs):
     tubeA, tubeB = objs["colA_tube"], objs["colB_tube"]
     ya = (vbounds([tubeA])[0][1] + vbounds([tubeA])[1][1]) / 2
     yb = (vbounds([tubeB])[0][1] + vbounds([tubeB])[1][1]) / 2
-    buses = [objs["colA_bus"], objs["colB_bus"], objs["cmblow_bus"]]
     ymax = 0.0
-    for b in buses:
-        lo_b, hi_b = vbounds([b])
-        ymax = max(ymax, abs(lo_b[1]), abs(hi_b[1]))
-    dlo, dhi = vbounds([objs["deck"]])
-    ymax = max(ymax, abs(dlo[1]), abs(dhi[1]))
-    print("[assembly] 布局：共机架两级堆叠——下层 deck + 合束器平台舱（吊挂），"
-          "上层 colB｜载荷舱｜colA 同层成排", flush=True)
-    print("[assembly] 基线（两镜筒轴距） = %.3f m（D2 需 2.3–2.6；PPT『~2.5 m』）" % abs(ya - yb), flush=True)
-    print("[assembly] D11 包络记录：三器舱体外缘 max|y| = %.3f m（需 ≤1.85）；总高 %.3f m（需 ≤%.2f）"
+    for n in ("colA_bus", "colB_bus", "bay"):
+        l, h = vbounds([objs[n]])
+        ymax = max(ymax, abs(l[1]), abs(h[1]))
+    print("[assembly] 两层：下层仅合束器平台舱（%.2f×%.2f×%.2f）；上层 colB｜载荷舱｜colA 同层成排"
+          % (BAY_W, BAY_L, BAY_T), flush=True)
+    print("[assembly] 集光器翼折叠平贴、合束器翼展开（依据 refs/frames/opt_f040.png）", flush=True)
+    print("[assembly] 基线 %.3f m（D2 需 2.3–2.6）" % abs(ya - yb), flush=True)
+    print("[assembly] D11 包络：三器舱体外缘 max|y| = %.3f m（需 ≤1.85）；总高 %.3f m（需 ≤%.2f）"
           % (ymax, hi[2] - lo[2], ENV_H), flush=True)
     print("[assembly] 包围盒 %.2f × %.2f × %.2f m；对象 %d（网格 %d）"
           % (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], len(objs), len(meshes)), flush=True)
@@ -184,11 +193,13 @@ def render_views():
     iso_dist = radius / math.sin(half_v) * 1.06
 
     views = (
-        ("side", dict(location=(0, 12, center.z), target=(0, 0, center.z), ortho=5.2)),
-        ("front", dict(location=(-12, 0, center.z), target=(0, 0, center.z), ortho=5.2)),
+        # front 沿 ±X 看：与反馈指定的基准帧 opt_f040.png **同视角**（集光器侧翼平贴与否
+        # 只有这个方向看得出），也是"镜筒—载荷舱—镜筒"成排的方向
+        ("front", dict(location=(12, 0, center.z), target=(0, 0, center.z), ortho=5.4)),
+        ("side", dict(location=(0, 12, center.z), target=(0, 0, center.z), ortho=5.4)),
         ("iso", dict(location=Vector((0.85, -1.0, 0.40)).normalized() * iso_dist
                      + Vector((0, 0, center.z)), target=(0, 0, center.z), lens=lens)),
-        ("top", dict(location=(0.0, 0.0, 10), target=(0.0, 0.0, DECK_TOP), ortho=4.4)),
+        ("top", dict(location=(0.0, 0.0, 10), target=(0.0, 0.0, BAY_TOP), ortho=4.4)),
     )
     for name, kw in views:
         C.point_camera(cam, **kw)
