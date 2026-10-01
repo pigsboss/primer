@@ -46,8 +46,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import assembly as A          # 只为平台舱（bay）的构造配方与 BAY_* 常量（两状态同一物体）
 import collector as C
 import combiner as M
+import wing as W
 
 OUT_DIR = os.path.join(HERE, "out", "formation")
 
@@ -73,8 +75,17 @@ COL_STAR_BASE = (1.0, 0.56, 0.63)    # 规格 §四 基色
 COL_STAR_EMIT = (1.0, 0.18, 0.18)    # 实测反解发光色（配 1.0 强度 → 核心 R/G=1.66，基准 1.66）
 COL_LINK_BASE = (1.0, 0.165, 0.10)
 COL_LINK_EMIT = (1.0, 0.05, 0.04)    # 规格 §四 表值（实测核心 R/G 2.46–2.88，基准 2.44）
-STAR_STRENGTH = 1.0              # 实测束体核心 R/G=1.66、R=0.867（基准 F5：1.66／0.886）
+STAR_STRENGTH = 1.0              # 亮芯：实测核心 R/G=1.66（基准 F5 1.66）
 LINK_STRENGTH = 3.0
+CORE_FRAC = 1.0 / 3.0            # 芯径＝壳径/3（§四 v1.8／T4）
+SHELL_ALPHA_STAR, SHELL_ALPHA_LINK = 0.30, 0.35   # 外壳半透明（晕）
+SHELL_STR_STAR, SHELL_STR_LINK = 0.60, 1.50       # 外壳发光强度（renewable 模式 ×0.3）
+END_LEN = 0.12                   # 两端点增亮段长度（判据 ≤0.15 m）
+END_STR_STAR, END_STR_LINK = 2.20, 4.00
+BEAM_MODE = "illustration"       # 全局开关：illustration（默认交付）｜realistic（准写实）
+BEAM_MODE_FACTOR = {"illustration": {"core": 1.0, "shell": 1.0},
+                    "realistic": {"core": 0.5, "shell": 0.3}}
+BEAM_MODE_NOTE = "illustration＝双层束（默认交付）；realistic＝芯径减半、壳强度×0.3、仅端点辉光"
 BEAM_DIFFUSE_DAMP = 0.05       # 束体漫反射反照压到 5%（光柱不是反射面，避免核心炸白）
 
 BG_TEXTURE = os.path.join(HERE, "..", "..", "assets", "textures", "8k_stars_milky_way.jpg")
@@ -103,7 +114,6 @@ RCS_ZF = 0.18                  # 喷管在舱顶以下的相对高度（×舱高
 RCS_EMBED = 0.012              # 根部嵌进舱面
 ANT_F = 0.55                   # 天线在舱顶的落位＝本体半宽 ×0.55
 ANT_R = (0.090, 0.130)         # 天线口径（集光器小定向 / 合束器高增益小锅）
-HINGE = (0.110, 0.110, 0.130)  # 翼根铰链块尺寸
 EDGE_W = 0.020                 # 翼缘描边宽（§四）
 BAFFLE_RINGS = 2               # 每根筒口内光阑环数
 BAFFLE_DZ = 0.050              # 环间距（自筒口向下）
@@ -223,8 +233,10 @@ def group(prefix, location, rot_z_deg, objs):
     return holder
 
 
-def emit_material(name, base, emit, strength):
+def emit_material(name, base, emit, strength, alpha=1.0, rim=False):
     """光束材质：socket 上留**规格基色**（E8 判色），实际发光用**实测反解色**。
+
+    ``alpha`` <1 ⇒ 半透明外壳（光晕）；``rim`` ⇒ Layer Weight 边缘加权（径向衰减，晕外沿更亮）。
 
     束体是"光柱"不是"反射面"：关高光、漫反射反照压到 5%，否则太阳灯在粉色面上打出白
     高光，radiance＝自发＋反射冲顶被 AgX 去饱和 → 核心炸白（实测 R/G 从 1.7 掉到 1.09）。
@@ -245,6 +257,15 @@ def emit_material(name, base, emit, strength):
             b.inputs[spec].default_value = 0.0
             break
     b.inputs["Metallic"].default_value = 0.0
+    if alpha < 1.0 and "Alpha" in b.inputs:
+        b.inputs["Alpha"].default_value = alpha
+    if rim and "Emission Strength" in b.inputs:
+        lw = m.node_tree.nodes.new("ShaderNodeLayerWeight")
+        mr = m.node_tree.nodes.new("ShaderNodeMapRange")
+        _set_in(mr, "To Min", strength * 0.25)
+        _set_in(mr, "To Max", strength * 1.60)
+        m.node_tree.links.new(lw.outputs["Facing"], mr.inputs[0])
+        m.node_tree.links.new(mr.outputs[0], b.inputs["Emission Strength"])
     damp = m.node_tree.nodes.new("ShaderNodeRGB")
     damp.outputs[0].default_value = (*[c * BEAM_DIFFUSE_DAMP for c in emit], 1.0)
     m.node_tree.links.new(damp.outputs[0], b.inputs["Base Color"])
@@ -506,7 +527,9 @@ def _apply_panel(m, spec, key):
     _, uv = _per_object(nt, coord.outputs["Object"], PANEL_SCALE_RANGE)
     uv = _domain_warp(nt, uv, key, strength=0.10, scale=1.2)
     waves = []
-    for direction in ("X", "Z"):
+    # 展开翼板的板面在 XY 平面（展向 X、弦向 Y、法向 Z）→ 板格两向取 X/Y；
+    # 若仍按旧竖直翼板取 X/Z，Z 向在 0.03 m 厚度上退化，域扭曲会把板格糊成随机斑块。
+    for direction in ("X", "Y"):
         w = nt.nodes.new("ShaderNodeTexWave")
         w.wave_type = "BANDS"
         w.bands_direction = direction
@@ -564,18 +587,21 @@ def _rebuild_materials():
 
 # ============================================================ 几何微起伏（§二.8）
 def _crown_mesh(ob, amount, cuts=CROWN_CUTS):
-    """帆板微弯：沿展向（局部 X）把板弓起 amount，顶点沿板面法向（局部 Y）位移 amount·(1−t²)。
+    """帆板微弯：沿**展向（板内最长轴）**弓起 amount，顶点沿**法向（最短轴）**位移 amount·(1−t²)。
 
-    立方体只有 8 个角点、t 全为 ±1、位移恒 0，必须先 bmesh 细分才弯得动（这是首版没想到的坑）。
+    按板自身的尺寸定轴：展开态板的最长轴是展向 X、最短轴是厚度 Z；收拢态则分别是 Z 与 X。
+    立方体只有 8 个角点、t 全为 ±1、位移恒 0，必须先 bmesh 细分才弯得动。
     """
     me = ob.data
     bm = bmesh.new()
     bm.from_mesh(me)
     bmesh.ops.subdivide_edges(bm, edges=list(bm.edges), cuts=cuts, use_grid_fill=True)
-    half = max((abs(v.co.x) for v in bm.verts), default=1.0) or 1.0
+    ext = [max(v.co[i] for v in bm.verts) - min(v.co[i] for v in bm.verts) for i in range(3)]
+    span_ax, norm_ax = ext.index(max(ext)), ext.index(min(ext))
+    half = max(abs(v.co[span_ax]) for v in bm.verts) or 1.0
     for v in bm.verts:
-        t = v.co.x / half
-        v.co.y += amount * (1.0 - t * t)
+        t = v.co[span_ax] / half
+        v.co[norm_ax] += amount * (1.0 - t * t)
     bm.to_mesh(me)
     bm.free()
     me.update()
@@ -673,30 +699,6 @@ def _box(name, loc, size, mat):
     return ob
 
 
-def _edge_frame(name, lo, hi, mat):
-    """翼缘描边：沿翼板四边各一条细梁。
-
-    不能用一个"略大一圈的盒子"罩住翼板——那会把蓝色电池面整个藏进铝板里。
-    """
-    cx, cy, cz = [(lo[i] + hi[i]) / 2 for i in range(3)]
-    dx, dy, dz = [hi[i] - lo[i] for i in range(3)]
-    ty = dy + 0.004
-    bars = (([cx, cy, cz + dz / 2], (dx + 2 * EDGE_W, ty, EDGE_W)),
-            ([cx, cy, cz - dz / 2], (dx + 2 * EDGE_W, ty, EDGE_W)),
-            ([cx + dx / 2, cy, cz], (EDGE_W, ty, dz + 2 * EDGE_W)),
-            ([cx - dx / 2, cy, cz], (EDGE_W, ty, dz + 2 * EDGE_W)))
-    parts = [_box("%s_b%d" % (name, i + 1), loc, size, mat)
-             for i, (loc, size) in enumerate(bars)]
-    bpy.ops.object.select_all(action="DESELECT")
-    for o in parts:
-        o.select_set(True)
-    bpy.context.view_layer.objects.active = parts[0]
-    bpy.ops.object.join()
-    ob = bpy.context.active_object
-    ob.name = name
-    return ob
-
-
 def upgrade(objs, tag, has_tube):
     """给一台器加推断默认件＋去周期化的几何/材料处理；**在加前缀、挂父级之前**调用。
 
@@ -708,7 +710,7 @@ def upgrade(objs, tag, has_tube):
     grey = C.new_material("MAT_up_grey", (0.55, 0.56, 0.58), 0.45, 0.60)
     added = []
 
-    body = objs["bus"]
+    body = objs.get("bus") or objs["bay"]
     # 去周期化①：本体大平面微起伏（幅度 ≤5 mm）——先变形，后续构件才贴在真实面上
     _undulate_mesh(body, "%s|body" % tag)
     # 去周期化②：帆板微弯（crown 0.005–0.02 m）——逐板随机、方向随机
@@ -737,16 +739,8 @@ def upgrade(objs, tag, has_tube):
     added.append(_dish("ANT_dish", (ANT_F * half_x, -ANT_F * half_y, top_z), grey,
                        ANT_R[0] if has_tube else ANT_R[1]))
 
-    # 3) 太阳翼：根部金色铰链块 ＋ 翼缘铝色描边
-    for p in [o for k, o in objs.items() if k.startswith("panel_")]:
-        plo, phi = _lbounds([p])
-        cz = (plo[2] + phi[2]) / 2
-        sx = 1.0 if (plo[0] + phi[0]) / 2 > 0 else -1.0
-        tag2 = "x%s_z%+.2f" % ("P" if sx > 0 else "N", cz)
-        root = min(abs(plo[0]), abs(phi[0]))        # 靠本体一侧的翼根面
-        added.append(_box("HINGE_" + tag2, (sx * (root + HINGE[0] / 2 - 0.035), 0.0, cz),
-                          HINGE, gold))
-        added.append(_edge_frame("EDGE_" + tag2, plo, phi, alu))
+    # 3) 太阳翼的根部铰链与翼缘描边由 wing.py 的 SADA/EDGE 提供（§二.9 机构化）；
+    #    此处只做**去周期化②**的帆板微弯（crown 0.005–0.02 m，逐板随机、方向随机）
 
     # 4) 镜筒口内光阑环（哑光黑环）：环不能是实心圆盘，否则会堵住筒口、
     #    也会与穿过筒口的星光束相交（E5）。环径按实测内壁半径反算，外缘压进内壁 6 mm。
@@ -786,6 +780,45 @@ def upgrade(objs, tag, has_tube):
 
 
 # ============================================================ 构件
+def build_cmb_parts():
+    """合束器＝**全高平台舱** 3.60×1.24×0.90（§二.3 v1.8）＋载荷舱＋SADA 翼×2＋储箱×2。
+
+    长宽沿用 assembly.py 的 BAY_L/BAY_W，高度 BAY_T 本轮联动勘误 0.50→0.90——**两状态同一物体**。
+    平台舱顶面落在 z=+0.45（与集光器舱顶同高）→ 收光口仍 ≈0.51，两状态光路同解（E18）。
+    collector.py／combiner.py 一行不动；载荷舱/储箱照旧复用 combiner/collector 的构件函数。
+    """
+    bay = A.build_bay()
+    bay.location = (0.0, 0.0, 0.0)      # 以箱心为原点 ⇒ 顶面 +0.45（assembly 系里顶面在 z=0）
+    parts = {"bay": bay}
+    grp = [M.build_module()] + M.build_recv() + [M.build_aux()]
+    lo = min(p[2] for p in _vlocal(grp))
+    for o in grp:                       # 载荷舱落平台舱顶面中央、根部嵌入 MODULE_EMBED
+        o.location = (o.location.x, o.location.y,
+                      o.location.z + ((A.BAY_T / 2 - A.MODULE_EMBED) - lo))
+    for o in grp:
+        parts[o.name.split(".")[0]] = o
+    for side in (+1.0, -1.0):           # SADA 翼×2（展开，法向朝 −Z）
+        for o in W.build_wing(side, A.BAY_W / 2, state="deployed"):
+            parts[o.name.split(".")[0]] = o
+    for t in C.build_tanks(face="X±"):
+        parts[t.name.split(".")[0]] = t
+    return parts
+
+
+def swap_wings(objs, face_x):
+    """把单体自带的翼板换成 wing.py 的 SADA＋4 板机构（§二.9 实施路径：单体文件一行不动）。"""
+    old = [o for k, o in objs.items() if k.startswith("panel_")]
+    new = []
+    for side in (+1.0, -1.0):
+        new += W.build_wing(side, face_x, state="deployed")
+    for o in old:
+        objs.pop(o.name.split(".")[0], None)
+        bpy.data.objects.remove(o, do_unlink=True)
+    for o in new:
+        objs[o.name.split(".")[0]] = o
+    return new
+
+
 def build_spacecraft():
     """三器：集光器与合束器都逐字复用阶段一/二单体 build()。返回 {tag: {holder, objs, outline_*}}。
 
@@ -795,9 +828,11 @@ def build_spacecraft():
     half = BASELINE_DISPLAY / 2
     specs = (("colA", C.build(purge=False), (0.0, -half, 0.0), 0.0),    # A 在 −Y：窗口朝 +Y
              ("colB", C.build(purge=False), (0.0, +half, 0.0), 180.0),  # B 在 +Y：窗口朝 −Y
-             ("cmb", M.build(purge=False), (0.0, 0.0, 0.0), 0.0))
+             ("cmb", build_cmb_parts(), (0.0, 0.0, 0.0), 0.0))
     out = {}
     for tag, objs, loc, rot in specs:
+        if tag != "cmb":                       # 集光器：单体翼板换成 SADA 机构（同制）
+            swap_wings(objs, (C.BUS_W + C.BUS_SHORT_W) / 4)
         parts = list(objs.values())
         before = _lbounds(parts)
         added = upgrade(objs, tag, has_tube=(tag != "cmb"))
@@ -849,40 +884,79 @@ def star_axes_and_mouth(col_objs):
     return axes, mouth
 
 
-def build_star_beams(col_objs, mat, top_z):
-    """粉色粗光束 ×2：自 +Z 垂直入射镜筒口；终点落最内光阑环截面，上端直达画框外（§二.5）。"""
-    beams = []
-    for tag in ("colA", "colB"):
-        objs = col_objs[tag]["objs"]
+def beam_group(tag, p0, p1, d_shell, mats, verts=24):
+    """一条束的三层（§四 v1.8／T4）：半透明外壳晕 ＋ 亮芯（芯径＝壳径/3）＋两端点增亮段。
+
+    外壳对象沿用 ``BEAM_<tag>`` 名并记录 p_start/p_end/diameter（壳径，E5/E6/E7 据此判），
+    另记录 core_diameter（E22）。端点段长度 END_LEN ≤0.15 m。
+    """
+    f = BEAM_MODE_FACTOR[BEAM_MODE]
+    core_d = d_shell * CORE_FRAC * f["core"]
+    shell = cylinder_between("BEAM_%s" % tag, p0, p1, d_shell / 2, mats["shell"], verts=verts)
+    shell["diameter"] = d_shell
+    shell["core_diameter"] = core_d
+    shell["beam_mode"] = BEAM_MODE
+    core = cylinder_between("BEAM_%s_core" % tag, p0, p1, core_d / 2, mats["core"], verts=verts)
+    ends = []
+    for i, (a, b) in enumerate(((p0, p1), (p1, p0)), start=1):
+        n = (Vector(b) - Vector(a)).normalized()
+        q0 = Vector(a)
+        e = cylinder_between("BEAM_%s_end%d" % (tag, i), q0, q0 + n * END_LEN,
+                             d_shell / 2, mats["end"], verts=verts)
+        e["end_len"] = END_LEN
+        ends.append(e)
+    return [shell, core] + ends
+
+
+def build_beams(craft, ports, top_z, mats_star, mats_link):
+    """四束（星光×2 粉粗、器间×2 红细），每条三层。返回 (光束组字典, 外壳列表)。"""
+    groups, shells = {}, []
+    for tag in ("colA", "colB"):                 # 星光：垂直入射筒口，终点在最内光阑环
+        objs = craft[tag]["objs"]
         tube = next(v for k, v in objs.items() if k.endswith("_tube"))
         lo, hi = vbounds([tube])
         cx, cy = (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2
         rings = [v for k, v in objs.items() if "_BAFFLE_" in k]
         inner_z = min(ring_plane_z(r) for r in rings) if rings else hi[2]
-        p0 = (cx, cy, inner_z - STAR_BOTTOM_EMBED)      # 下端没入最内环
-        p1 = (cx, cy, top_z)                            # 上端由视场反算，保证出画
-        beams.append(cylinder_between("BEAM_star_%s" % tag, p0, p1, D_STAR / 2, mat, verts=32))
-    return beams
-
-
-def build_link_beams(col_objs, ports, mat):
-    """红色细光束 ×2：集光器出光窗口 → 合束器对应收光口，两端各内嵌 EMBED。"""
-    beams = []
-    for tag, port_tag in (("colA", "negY"), ("colB", "posY")):
-        win = next(v for k, v in col_objs[tag]["objs"].items() if k.endswith("_window_out"))
+        p0 = (cx, cy, inner_z - STAR_BOTTOM_EMBED)
+        p1 = (cx, cy, top_z)
+        groups["star_%s" % tag] = beam_group("star_%s" % tag, p0, p1, D_STAR, mats_star, verts=32)
+    for tag, port_tag in (("colA", "negY"), ("colB", "posY")):   # 器间：窗口→收光口
+        win = next(v for k, v in craft[tag]["objs"].items() if k.endswith("_window_out"))
         wlo, whi = vbounds([win])
         wc = [(wlo[i] + whi[i]) / 2 for i in range(3)]
-        # 朝向合束器的一侧：colA 在 −Y → 朝 +Y；colB 在 +Y → 朝 −Y
         sgn = 1.0 if tag == "colA" else -1.0
         face_y = whi[1] if sgn > 0 else wlo[1]
-        p0 = (wc[0], face_y - sgn * EMBED, wc[2])       # 起点：窗口面内嵌
-        p = ports[port_tag]
-        plo, phi = vbounds([p])
+        p0 = (wc[0], face_y - sgn * EMBED, wc[2])
+        plo, phi = vbounds([ports[port_tag]])
         pc = [(plo[i] + phi[i]) / 2 for i in range(3)]
-        pface = phi[1] if sgn < 0 else plo[1]           # 收光口朝集光器的那一面
-        p1 = (pc[0], pface + sgn * EMBED, pc[2])        # 终点：收光口内嵌
-        beams.append(cylinder_between("BEAM_link_%s" % tag, p0, p1, D_LINK / 2, mat, verts=16))
-    return beams
+        pface = phi[1] if sgn < 0 else plo[1]
+        p1 = (pc[0], pface + sgn * EMBED, pc[2])
+        groups["link_%s" % tag] = beam_group("link_%s" % tag, p0, p1, D_LINK, mats_link, verts=16)
+    shells = [g[0] for g in groups.values()]
+    return groups, shells
+
+
+def beam_materials(mode=None, tag="star"):
+    """按当前（或指定）模式造三条光束材质：壳／芯／端点。"""
+    old = BEAM_MODE
+    if mode:
+        globals()["BEAM_MODE"] = mode
+    f = BEAM_MODE_FACTOR[BEAM_MODE]
+    if tag == "star":
+        base, emit = COL_STAR_BASE, COL_STAR_EMIT
+        sh, al, es, ee = SHELL_STR_STAR, SHELL_ALPHA_STAR, STAR_STRENGTH, END_STR_STAR
+    else:
+        base, emit = COL_LINK_BASE, COL_LINK_EMIT
+        sh, al, es, ee = SHELL_STR_LINK, SHELL_ALPHA_LINK, LINK_STRENGTH, END_STR_LINK
+    mats = {
+        "shell": emit_material("MAT_beam_%s_shell" % tag, base, base, sh * f["shell"],
+                               alpha=al, rim=True),
+        "core": emit_material("MAT_beam_%s_core" % tag, base, emit, es),
+        "end": emit_material("MAT_beam_%s_end" % tag, base, emit, ee),
+    }
+    globals()["BEAM_MODE"] = old
+    return mats
 
 
 # ============================================================ 相机与构图
@@ -1195,12 +1269,50 @@ def render_views(final=False):
         bpy.ops.render.render(write_still=True)
         print("[formation] 出图 %s" % scene.render.filepath, flush=True)
 
+    # §四/T4：准写实对照——同相机同光路，仅芯径减半、壳强度 ×0.3、仅端点辉光
+    set_beam_mode("realistic")
+    point(cam, **dict(views[4][1]))
+    scene.render.filepath = os.path.join(OUT_DIR, "wide_realistic.png")
+    bpy.ops.render.render(write_still=True)
+    print("[formation] 出图 %s（准写实模式对照）" % scene.render.filepath, flush=True)
+
     if final:      # 正式档另留一张 EXR 底片（规格 §五）
         scene.render.image_settings.file_format = "OPEN_EXR"
         point(cam, **dict(views[4][1]))
         scene.render.filepath = os.path.join(OUT_DIR, "wide.exr")
         bpy.ops.render.render(write_still=True)
         print("[formation] 出图 %s" % scene.render.filepath, flush=True)
+
+
+def set_beam_mode(mode):
+    """切换光束模式并**按记录端点重建**束体：端点/走向/口径比完全不变（E22）。
+
+    重建而非缩放：几何由同一组 p_start/p_end 生成，两模式的光路逐点一致可核。
+    """
+    old = bpy.data.objects.get("BEAM_star_colA")
+    if old is None:
+        return
+    ends = {o.name: (list(o["p_start"]), list(o["p_end"]), o["diameter"])
+            for o in bpy.data.objects if o.name.startswith("BEAM_") and "p_start" in o.keys()
+            and "_core" not in o.name and "_end" not in o.name}
+    layout = bpy.data.objects["EMPTY_LAYOUT"]
+    for o in [o for o in bpy.data.objects if o.name.startswith("BEAM_")]:
+        bpy.data.objects.remove(o, do_unlink=True)
+    globals()["BEAM_MODE"] = mode
+    for m in [m for m in bpy.data.materials if m.name.startswith("MAT_beam_")]:
+        bpy.data.materials.remove(m, do_unlink=True)
+    mats = {"star": beam_materials(tag="star"), "link": beam_materials(tag="link")}
+    made = []
+    for nm, (p0, p1, d) in ends.items():
+        kind = "star" if nm.startswith("BEAM_star") else "link"
+        made += beam_group(nm.replace("BEAM_", ""), p0, p1, d, mats[kind],
+                           verts=32 if kind == "star" else 16)
+    for ob in made:
+        ob.parent = layout
+    C.refresh()
+    layout["BEAM_MODE"] = mode
+    print("[formation] BEAM_MODE → %s（束体按记录端点重建，光路不变）" % mode, flush=True)
+    return made
 
 
 def build():
@@ -1222,8 +1334,10 @@ def build():
                                "MAT_beam_link 基色 %s／发光 %s／强度 %g"
                                % (COL_STAR_BASE, COL_STAR_EMIT, STAR_STRENGTH,
                                   COL_LINK_BASE, COL_LINK_EMIT, LINK_STRENGTH))
-    layout["cmb_body"] = "阶段二单体整机（舱 %.2f×%.2f×%.2f＋载荷舱 Ø%.2f×%.2f，§二.3 v1.7）" \
-        % (C.BUS_W, C.BUS_D, C.BUS_H, 2 * M.MODULE_R + 2 * M.MODULE_RIM_OVER, M.MODULE_H)
+    layout["cmb_body"] = ("全高平台舱 %.2f×%.2f×%.2f（与组合体同一物体，§二.3 v1.8）"
+                          "＋载荷舱 Ø%.2f×%.2f" % (A.BAY_L, A.BAY_W, A.BAY_T,
+                                                  2 * M.MODULE_R + 2 * M.MODULE_RIM_OVER,
+                                                  M.MODULE_H))
 
     craft = build_spacecraft()
     _rebuild_materials()                      # §四 参数表：场景内重建（三器文件不动）
@@ -1240,8 +1354,10 @@ def build():
         holder["added_parts"] = rec["added"]
     C.refresh()
 
-    mat_star = emit_material("MAT_beam_star", COL_STAR_BASE, COL_STAR_EMIT, STAR_STRENGTH)
-    mat_link = emit_material("MAT_beam_link", COL_LINK_BASE, COL_LINK_EMIT, LINK_STRENGTH)
+    mats_star = beam_materials(tag="star")          # 壳／芯／端点三层（§四 v1.8）
+    mats_link = beam_materials(tag="link")
+    layout["BEAM_MODE"] = BEAM_MODE
+    layout["BEAM_MODE_note"] = BEAM_MODE_NOTE
 
     ports = build_ports(craft["cmb"]["objs"])
     # 星光束长度按五张交付视角的视场反算（§二.5）——必须先有相机与视角表
@@ -1255,28 +1371,29 @@ def build():
     print("[formation] 星光束长度反算：筒口 z=%.2f → 束顶 z=%.2f（长 %.2f m，五视角均出画）"
           % (mouth, top_z, top_z - mouth), flush=True)
 
-    beams = build_star_beams(craft, mat_star, top_z) + build_link_beams(craft, ports, mat_link)
-    for ob in list(ports.values()) + beams:
-        ob.parent = layout                # 三器与四束均挂布局父级（E9）
+    groups, shells = build_beams(craft, ports, top_z, mats_star, mats_link)
+    beam_objs = [o for g in groups.values() for o in g]
+    for ob in list(ports.values()) + beam_objs:
+        ob.parent = layout                # 三器与四束（含芯/端点段）均挂布局父级（E9）
     C.refresh()
     layout["random_seed"] = SEED
     layout["random_json"] = json.dumps(RANDOM_LOG, ensure_ascii=False, sort_keys=True)
 
     objs = {o.name: o for o in bpy.context.scene.objects}
-    report(objs, beams)
+    report(objs, shells)
     return objs
 
 
 def report(objs, beams):
     lo, hi = vbounds([o for o in objs.values() if o.type == "MESH"])
     cA, cB = vcenter(objs["colA_bus"]), vcenter(objs["colB_bus"])
-    cmb_body = objs["cmb_bus"]
+    cmb_body = objs.get("cmb_bay") or objs["cmb_bus"]
     bl, bh = vbounds([cmb_body])
     print("[formation] 编队：显示基线 %.1f m（真实 %g–%g m，不成比例）"
           % (BASELINE_DISPLAY, *BASELINE_REAL_M), flush=True)
     print("[formation] 实测基线 |y_colA−y_colB| = %.3f m；合束器 y = %+.3f"
           % (abs(cA[1] - cB[1]), vcenter(cmb_body)[1]), flush=True)
-    print("[formation] 合束器（阶段二单体）：舱 %.3f × %.3f × %.3f m；载荷舱 %.3f × %.3f × %.3f m"
+    print("[formation] 合束器（全高平台舱）：%.3f × %.3f × %.3f m；载荷舱 %.3f × %.3f × %.3f m"
           % (bh[0] - bl[0], bh[1] - bl[1], bh[2] - bl[2],
              *[vbounds([objs["cmb_module"]])[1][i] - vbounds([objs["cmb_module"]])[0][i]
                for i in range(3)]), flush=True)
@@ -1289,8 +1406,8 @@ def report(objs, beams):
               % (b.name, length, bbh[0] - bbl[0], bbh[1] - bbl[1], bbh[2] - bbl[2]), flush=True)
     for tag in ("colA", "colB", "cmb"):
         up = [n for n in objs if n.startswith(tag + "_")
-              and any(k in n for k in ("_RCS_", "_ANT_", "_HINGE_", "_EDGE_",
-                                       "_BAFFLE_", "_TURNTABLE_", "_ROD_"))]
+              and any(k in n for k in ("_RCS_", "_ANT_", "_BAFFLE_",
+                                       "_TURNTABLE_", "_ROD_"))]     # 推断默认件（翼机构另计）
         print("[formation] %s 升级件 %d 件" % (tag, len(up)), flush=True)
     print("[formation] 包围盒 %.2f × %.2f × %.2f m；对象 %d"
           % (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], len(objs)), flush=True)

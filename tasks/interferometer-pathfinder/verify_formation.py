@@ -3,7 +3,7 @@
 
 用法：blender --background --python verify_formation.py
 输出：out/formation/verify_log.txt 与 out/formation/formation_report.json（E12）。
-判据逐条对应《阶段四_验收清单》v1.3 E1–E19（规格 v1.7），不自增删；每条判据的证据都从
+判据逐条对应《阶段四_验收清单》v1.4 E1–E22（规格 v1.8），不自增删；每条判据的证据都从
 **场景实测**取，不采信建模脚本的自报值（E14 的包络增量、E17 的随机量都由验收侧独立复算）。
 版本敏感 API 设后回读（规范 §三）；全部几何判定用网格顶点真实包围盒；读取失败即 FAIL；
 main() 异常打印 traceback。
@@ -29,6 +29,7 @@ import traceback
 
 import bpy
 from bpy_extras.object_utils import world_to_camera_view
+from mathutils import Vector  # noqa: F401  (E21 用到)
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
@@ -40,12 +41,21 @@ os.makedirs(OUT, exist_ok=True)
 LOG = os.path.join(OUT, "verify_log.txt")
 REPORT = os.path.join(OUT, "formation_report.json")
 
-V13_MARKS = ("_RCS_", "_ANT_", "_HINGE_", "_EDGE_", "_BAFFLE_", "_TURNTABLE_", "_ROD_")
+# "新增件"只指推断默认件；翼机构（SADA/帆板/铰链/翼缘）是 §二.9 的构型构件，算本体不计增量
+V13_MARKS = ("_RCS_", "_ANT_", "_BAFFLE_", "_TURNTABLE_", "_ROD_")
+WING_PARTS = ("SADA", "HINGE")                       # 每翼：SADA×1＋板间铰链×3
+WING_PANELS = 4
 ENV_R, ENV_H = 1.825, 4.610        # 阶段三 D11 的包络常数：本阶段承接其连续性
 # §二.3 v1.7：合束器＝阶段二单体整机；**场景中不得存在 bay 类对象**（名＋网格包围盒双重判定）
-CMB_PARTS = ("bus", "module", "recv_01", "recv_02", "aux_01",
-             "panel_X1", "panel_X2", "panel_-X1", "panel_-X2", "tank_01", "tank_02")
-BAY_DIM, BAY_TOL = (1.24, 3.60, 0.50), 0.05     # bay 类对象的特征尺寸与容差
+WING_NEED = tuple("SADA_%s" % sx for sx in ("X", "-X")) \
+    + tuple("panel_%s%d" % (sx, i) for sx in ("X", "-X") for i in range(1, WING_PANELS + 1)) \
+    + tuple("HINGE_%s0%d" % (sx, i) for sx in ("X", "-X") for i in range(1, 4))
+CMB_PARTS = ("bay", "module", "recv_01", "recv_02", "aux_01",
+             "panel_X1", "panel_X4", "panel_-X1", "panel_-X4", "HINGE_X01", "HINGE_X03",
+             "SADA_X", "SADA_-X", "tank_01", "tank_02")
+BAY_DIM, BAY_TOL = (1.24, 3.60, 0.90), 0.04   # dims() 次序为 X,Y,Z     # §二.3 v1.8：全高平台舱（Y×X×Z），含微起伏容差
+CUBE_DIM, CUBE_TOL = (1.20, 1.20, 0.90), 0.05   # 被作废的"1.2 m 立方舱冒充 cmb 本体"特征尺寸
+WING_SPAN_REF, WING_SPAN_TOL = 4.56, 0.05       # 翼展参考与容差（±5%）
 MLI_GOLD_F0 = (1.00, 0.78, 0.35)                # §四：金色 MLI 的 F0（±0.02）
 WRINKLE_RANGE = (0.01, 0.05)                    # §二.8 介观尺度红线（m）
 PERIODIC = ("TEX_WAVE", "TEX_CHECKER", "TEX_MAGIC", "TEX_GRID", "TEX_VORONOI")  # 本清单自带禁令
@@ -201,33 +211,38 @@ def links_to_object_info(mat):
     return False
 
 
-def panel_crown(o):
-    """帆板 crown：对象空间里板面法向（局部 y）的半极值 − 半板厚。
+def _panel_axes(o):
+    """板的三个轴：展向＝最长轴、法向＝最短轴（收展两态自动适配）。"""
+    pts = [o.matrix_basis @ v.co for v in o.data.vertices]
+    ext = [max(p[i] for p in pts) - min(p[i] for p in pts) for i in range(3)]
+    return pts, ext.index(max(ext)), ext.index(min(ext))
 
-    平的板 → 0；弓起 c → c。**必须在对象空间量**（colB 整体绕 Z 转 180°，世界系会翻号）。
+
+def panel_crown(o):
+    """帆板 crown：板上法向（最短轴）的半极值 − 半板厚。
+
+    平的板 → 0；弓起 c → c。**必须在对象空间量**（colB 整体绕 Z 转 180°，世界系会翻号），
+    且按板自身的轴（展开态法向是 Z、收拢态是 X）——首版写死 y 轴，换机构后量出来是板宽。
     """
-    ys = [(o.matrix_basis @ v.co).y for v in o.data.vertices]
-    return max(abs(y) for y in ys) - 0.015
+    pts, _, norm_ax = _panel_axes(o)
+    thick = panel_local_thickness(o) or min(o.dimensions)
+    return max(abs(p[norm_ax]) for p in pts) - thick / 2
 
 
 def panel_local_thickness(o, bins=8):
-    """逐展向切片的局部厚度，取中位——crown 不改变板料厚度，改的是它的弯曲。"""
-    pts = [o.matrix_basis @ v.co for v in o.data.vertices]
+    """逐**展向**切片的局部厚度中位值——crown 只弯板，不改板料厚度。"""
+    pts, span_ax, norm_ax = _panel_axes(o)
     if not pts:
         return None
-    xlo = min(p.x for p in pts)
-    xhi = max(p.x for p in pts)
-    step = max((xhi - xlo) / bins, 1e-6)
+    lo = min(p[span_ax] for p in pts)
+    step = max((max(p[span_ax] for p in pts) - lo) / bins, 1e-6)
     th = []
     for b in range(bins):
-        lo, hi = xlo + b * step, xlo + (b + 1) * step
-        ys = [p.y for p in pts if lo - 1e-6 <= p.x <= hi + 1e-6]
-        if len(ys) >= 2:
-            th.append(max(ys) - min(ys))
-    if not th:
-        return None
-    th.sort()
-    return th[len(th) // 2]
+        a0, a1 = lo + b * step, lo + (b + 1) * step
+        vs = [p[norm_ax] for p in pts if a0 - 1e-6 <= p[span_ax] <= a1 + 1e-6]
+        if len(vs) >= 2:
+            th.append(max(vs) - min(vs))
+    return sorted(th)[len(th) // 2] if th else None
 
 
 def png_size(p):
@@ -266,8 +281,10 @@ def main():
     col_parts = ("bus", "tube", "panel_X1", "panel_X2", "panel_-X1", "panel_-X2",
                  "window_out", "tank_01", "tank_02")
     cmb_parts = CMB_PARTS
+    need_wing = {t: [f"{t}_{n}" for n in WING_NEED if not find(f"{t}_{n}")]
+                 for t in ("colA", "colB", "cmb")}
     gimbals = {t: [o for o in group_objs(t) if o.name.startswith(t + "_gimbal")] for t in ("colA", "colB")}
-    cmb_body = find("cmb_bus")
+    cmb_body = find("cmb_bay") or find("cmb_bus")
 
     # ---- E1 对象齐备 + 关键尺寸抽检（v1.2：cmb＝bay 本体）----
     miss = [f"{t}_{p}" for t in ("colA", "colB") for p in col_parts if not find(f"{t}_{p}")]
@@ -278,26 +295,30 @@ def main():
     bus = [bus_hi[i] - bus_lo[i] for i in range(3)]
     tube = dims([find("colA_tube")])
     mod_dims = dims([find("cmb_module")]) if find("cmb_module") else [0, 0, 0]
+    bay_dims = dims([cmb_body]) if cmb_body else [0, 0, 0]
+    bay_ok = (abs(bay_dims[0] - BAY_DIM[0]) <= BAY_TOL and abs(bay_dims[1] - BAY_DIM[1]) <= BAY_TOL
+              and abs(bay_dims[2] - BAY_DIM[2]) <= BAY_TOL)
     cmb_ok = (1.15 <= max(bus[0], bus[1]) <= 1.30 and 0.85 <= bus[2] <= 0.95
               and abs(max(mod_dims[0], mod_dims[1]) - 0.516) <= 0.02
-              and abs(mod_dims[2] - 0.700) <= 0.02)
-    # bay 类对象：名中带 bay，或网格真实包围盒≈1.24×3.60×0.50 的长扁箱（v1.5 的 bay 已作废）
-    bay_named = [o.name for o in bpy.data.objects if "bay" in o.name.lower()]
-    bay_shaped = []
-    for o in bpy.data.objects:
-        if o.type != "MESH":
-            continue
-        d = dims([o])
-        if all(abs(d[i] - BAY_DIM[i]) <= BAY_TOL for i in range(3)):
-            bay_shaped.append((o.name, [round(v, 3) for v in d]))
-    check("E1", "对象齐备：colA/colB 复用阶段一单体；**cmb＝阶段二单体整机**（bus 1.20×1.20×0.90"
-                "＋module Ø0.52×0.70＋recv×2＋aux＋翼×4＋储箱×2）；**场景中不存在 bay 类对象**；四束与"
-                " EMPTY_LAYOUT 齐备",
-          not miss and gim_ok and cmb_ok and not bay_named and not bay_shaped,
-          f"缺件={miss or '无'}；gimbal={[len(gimbals[t]) for t in ('colA', 'colB')]}；"
+              and abs(mod_dims[2] - 0.700) <= 0.02 and bay_ok)
+    # 被作废的旧指向：cmb 本体若是 1.2 m 立方舱则判 FAIL（按名＋网格真实包围盒双判）
+    cube_named = [o.name for o in bpy.data.objects
+                  if o.name.startswith("cmb") and "bay" not in o.name and "module" not in o.name
+                  and o.type == "MESH" and "SADA" not in o.name and "panel" not in o.name
+                  and "HINGE" not in o.name and "EDGE" not in o.name and "RCS" not in o.name
+                  and "ANT" not in o.name and "port" not in o.name and "tank" not in o.name
+                  and "recv" not in o.name and "aux" not in o.name]
+    cube_shaped = [(n, [round(v, 3) for v in dims([find(n)])]) for n in cube_named
+                   if all(abs(dims([find(n)])[i] - CUBE_DIM[i]) <= CUBE_TOL for i in range(3))]
+    wing_bad = {t: v for t, v in need_wing.items() if v}
+    check("E1", "对象齐备：colA/colB 复用阶段一单体；**cmb＝全高平台舱 3.60×1.24×0.90**（与组合体同一"
+                "物体）＋module Ø0.52×0.70＋recv×2＋aux＋**SADA 翼×2（每翼 4 板）**＋储箱×2；"
+                "**不存在 1.2 m 立方舱冒充 cmb 本体**；四束与 EMPTY_LAYOUT 齐备",
+          not miss and gim_ok and cmb_ok and not wing_bad and not cube_shaped,
+          f"缺件={miss or '无'}；翼机构缺件={wing_bad or '无'}；gimbal={[len(gimbals[t]) for t in ('colA', 'colB')]}；"
           f"集光器舱{['%.2f' % v for v in bus]}、筒径{max(tube[0], tube[1]):.3f}；"
-          f"合束器舱{['%.2f' % v for v in dims([cmb_body])]}、载荷舱{['%.3f' % v for v in mod_dims]}；"
-          f"bay 类对象：名={bay_named or '无'}／形={bay_shaped or '无'}")
+          f"平台舱{['%.3f' % v for v in bay_dims]}（目标 {BAY_DIM}）、载荷舱{['%.3f' % v for v in mod_dims]}；"
+          f"1.2 m 立方舱冒充本体={cube_shaped or '无'}")
 
     if miss or not layout:
         raise SystemExit("关键对象缺失，终止")
@@ -445,13 +466,16 @@ def main():
                 if oa.type == "MESH" and ob.type == "MESH" and bvh([oa]).overlap(bvh([ob])):
                     cross.append((oa.name, ob.name))
     e10_ok = dmin >= bus_w and not cross
-    check("E10", "三器两两间距 ≥ 舱宽；三器之间无网格相交", e10_ok,
+    half_len = max(abs(bb([cmb_body])[0][1]), abs(bb([cmb_body])[1][1]))
+    check("E10", "三器两两间距 ≥ 舱宽（合束器按平台舱半长 %.2f m 计入）；三器之间无网格相交"
+          % half_len, e10_ok,
           f"最小间距={dmin:.3f} m（需≥{bus_w:.2f}）；相交对={cross or '无'}")
 
     # ---- E11 渲染自检 ----
     sizes = {f: png_size(os.path.join(OUT, f)) for f in
-             ("front.png", "side.png", "top.png", "iso.png", "wide.png")}
-    check("E11", "out/formation/ 五张 PNG ≥1200×900",
+             ("front.png", "side.png", "top.png", "iso.png", "wide.png",
+              "wide_realistic.png", "mat_bench.png")}
+    check("E11", "out/formation/ 五张预览＋wide_realistic.png＋mat_bench.png 均 ≥1200×900",
           all(w >= 1200 and h >= 900 for w, h in sizes.values()), f"{sizes}")
 
     # ---- 升级件清点（E13–E17 与 E12 记录共用；独立实测，不采信建模脚本自报）----
@@ -475,11 +499,14 @@ def main():
             "n_rcs": len([o for o in added if "_RCS_" in o.name]),
             "n_ant": len([o for o in added if "_ANT_" in o.name]),
             "n_hinge": len([o for o in added if "_HINGE_" in o.name]),
-            "n_edge": len([o for o in added if "_EDGE_" in o.name]),
-            "n_baffle": len([o for o in added if "_BAFFLE_" in o.name]),
+            "n_edge": len([o for o in meshes if "_EDGE_" in o.name]),
+            "n_baffle": len([o for o in meshes if "_BAFFLE_" in o.name]),
+            "n_sada": len([o for o in meshes if "_SADA_" in o.name]),
+            "n_hinge": len([o for o in meshes if "_HINGE_" in o.name]),
             "n_cluster": len([o for o in meshes if "_gimbal" in o.name
                               or "_TURNTABLE_" in o.name or "_ROD_" in o.name]),
             "panel_thickness_m": [round(panel_local_thickness(o), 4) for o in panels],
+            "n_panel": len(panels),
             "panel_bbox_m": [round(dims([o])[1], 4) for o in panels],
             "panel_crown_m": [round(panel_crown(o), 4) for o in panels],
         }
@@ -514,6 +541,9 @@ def main():
                       "strength": layout.get("starfield_strength")},
         "colorspace": {"view_transform": scene.view_settings.view_transform,
                        "look": scene.view_settings.look},
+        "BEAM_MODE": layout.get("BEAM_MODE"),
+        "BEAM_MODE_note": layout.get("BEAM_MODE_note"),
+        "cmb_body_v18": layout.get("cmb_body"),
         "random_seed": layout.get("random_seed"),
         "random_values": rnd,
         "material_table": mlog,
@@ -524,16 +554,14 @@ def main():
         "upgrade_v13": v13,
         "renders": {k: list(v) for k, v in sizes.items()},
     }
-    with open(REPORT, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
     need = ("baseline_real_m", "baseline_display_m", "beam_d_star_m", "wing_state_T1")
     check("E12", "formation_report.json 记录真实/显示基线、束径、材质、翼态、sun_dir、星场强度、"
-                 "**全部随机种子**、**MLI 褶皱特征尺度**",
+                 "全部随机种子、MLI 褶皱特征尺度、**BEAM_MODE**",
           all(report.get(k) is not None for k in need) and report["sun_dir"]
           and report["starfield"]["strength"] is not None
           and report["random_seed"] is not None and bool(report["random_values"])
-          and bool(wrinkle),
-          f"已写 {os.path.relpath(REPORT, HERE)}（随机量 {len(rnd)} 项，种子 {report['random_seed']}；"
+          and bool(wrinkle) and report["BEAM_MODE"] is not None,
+          f"已收集，全部判据后一次写出（随机量 {len(rnd)} 项，种子 {report['random_seed']}；"
           f"材料台账 {len(mlog)} 行；褶皱尺度 {wrinkle} m）")
 
     # ---- E13 推断默认件齐备 ----
@@ -544,8 +572,8 @@ def main():
             bad.append(f"{t}RCS={d['n_rcs']}")
         if d["n_ant"] != 1:
             bad.append(f"{t}天线={d['n_ant']}")
-        if d["n_hinge"] < 1:
-            bad.append(f"{t}铰链={d['n_hinge']}")
+        if d["n_sada"] < 2:
+            bad.append(f"{t}翼根 SADA={d['n_sada']}（应 2）")
         if d["n_edge"] != len(d["panel_thickness_m"]):
             bad.append(f"{t}翼缘={d['n_edge']}/{len(d['panel_thickness_m'])}")
         if not all(v and 0.02 <= v <= 0.04 for v in d["panel_thickness_m"]):
@@ -556,11 +584,12 @@ def main():
             bad.append(f"{t}光阑环={d['n_baffle']}")
         if d["n_cluster"] < 3:
             bad.append(f"{t}机构簇={d['n_cluster']}")
-    check("E13", "推断默认件齐备：每器 RCS 喷管×4、测控天线×1、翼板厚 0.02–0.04 且根部有铰链、"
-                 "筒口光阑环≥1、集光器机构簇≥3 件",
+    check("E13", "推断默认件齐备：每器 RCS 喷管×4、测控天线×1、翼板厚 0.02–0.04（每器 8 板）且"
+                 "根部有铰链（SADA×2）、筒口光阑环≥1、集光器机构簇≥3 件",
           not bad,
           f"RCS={[v13[t]['n_rcs'] for t in v13]}；天线={[v13[t]['n_ant'] for t in v13]}；"
-          f"铰链={[v13[t]['n_hinge'] for t in v13]}；翼缘={[v13[t]['n_edge'] for t in v13]}；"
+          f"翼根 SADA={[v13[t]['n_sada'] for t in v13]}；板间铰链={[v13[t]['n_hinge'] for t in v13]}；"
+          f"翼缘={[v13[t]['n_edge'] for t in v13]}；"
           f"局部翼厚={v13['colA']['panel_thickness_m']}（法向包围盒 "
           f"{v13['colA']['panel_bbox_m']}，差＝crown）；光阑环={[v13[t]['n_baffle'] for t in v13]}；"
           f"机构簇={[v13[t]['n_cluster'] for t in v13]}；异常={bad or '无'}")
@@ -694,6 +723,131 @@ def main():
           "储箱 %d 件 albedo/rough=%s；机构件 %d 件 metallic/rough=%s；翼板 %d 件 base=%s、coat=%s"
           % (len(tank_mats), tank_row, len(mech_mats), mech_row,
              len(panel_mats), panel_base, panel_coat))
+
+
+    # ---- E20 太阳翼机构（v1.4 增）：每翼 SADA×1＋4 板＋板间铰链×3；展开成线、法向朝 −Z ----
+    e20, e20_ok, e20_rows = {}, True, []
+    for t in ("colA", "colB", "cmb"):
+        for sx in ("X", "-X"):
+            sada = find("%s_SADA_%s" % (t, sx))
+            ps = [find("%s_panel_%s%d" % (t, sx, i)) for i in range(1, WING_PANELS + 1)]
+            hs = [find("%s_HINGE_%s0%d" % (t, sx, i)) for i in range(1, 4)]
+            if not sada or any(p is None for p in ps) or any(h is None for h in hs):
+                e20_ok = False
+                e20_rows.append(f"{t}{sx}:件数不全")
+                continue
+            cs = [ctr(p) for p in ps]
+            thick_axis = [dims([p]).index(min(dims([p]))) for p in ps]
+            normal_ok = all(a == 2 for a in thick_axis)          # 厚度沿 Z ⇒ 法向 ±Z（与 −Z 夹角 0°）
+            collinear = (max(c[1] for c in cs) - min(c[1] for c in cs) <= 0.02
+                         and max(c[2] for c in cs) - min(c[2] for c in cs) <= 0.02)
+            xs = sorted(c[0] for c in cs)
+            step = [xs[i + 1] - xs[i] for i in range(WING_PANELS - 1)]
+            even = (max(step) - min(step)) <= 0.02
+            panel_len = [round(dims([p])[0], 3) for p in ps]     # 展向长＝原板长/4
+            good = normal_ok and collinear and even and all(abs(v - 0.45) <= 0.02 for v in panel_len)
+            e20_ok = e20_ok and good
+            e20_rows.append(f"{t}{sx}:1×SADA+4 板+3 铰/板长{panel_len}/法向−Z={normal_ok}/成线={collinear}/等距={even}")
+        objs = [find("%s_SADA_%s" % (t, sx)) for sx in ("X", "-X")] + \
+               [find("%s_panel_%s%d" % (t, sx, i)) for sx in ("X", "-X") for i in range(1, WING_PANELS + 1)]
+        objs = [o for o in objs if o]
+        e20[t] = {"span_m": round(dims(objs)[0], 3),
+                  "wing_len_m": round(sum(dims([find("%s_panel_%s%d" % (t, sx, i))])[0]
+                                          for i in range(1, WING_PANELS + 1)), 3)
+                  if all(find("%s_panel_%s%d" % (t, sx, i)) for i in range(1, WING_PANELS + 1))
+                  else None}
+    span_vals = [v["span_m"] for v in e20.values()]
+    span_ok = all(4.30 <= s0 <= 5.10 for s0 in span_vals)        # ≈4.56＋SADA 外推/平台舱宽度差
+    check("E20", "太阳翼机构：每器每翼 SADA 球铰×1＋帆板×4＋板间铰链×3；4 板成线自 SADA 外伸、"
+                 "法向朝 −Z（夹角 0°≤30°）、翼展 ≈4.56 m/器；集光器与合束器同制",
+          e20_ok and span_ok,
+          f"翼展={e20}；" + "；".join(e20_rows[:3]))
+
+    # ---- E22 光束双层结构与双模式（v1.4 增／T4）----
+    e22, e22_ok = {}, True
+    for tag in ("star_colA", "star_colB", "link_colA", "link_colB"):
+        shell, core = find("BEAM_%s" % tag), find("BEAM_%s_core" % tag)
+        ends = [find("BEAM_%s_end%d" % (tag, i)) for i in (1, 2)]
+        if not shell or not core or any(e is None for e in ends):
+            e22_ok = False
+            e22[tag] = "缺层"
+            continue
+        ds, dc = shell["diameter"], core["diameter"]
+        ratio = ds / dc if dc else 0
+        end_len = [e.get("end_len") for e in ends]
+        good = abs(ratio - 3.0) <= 0.6 and all(v is not None and v <= 0.15 for v in end_len)
+        e22_ok = e22_ok and good
+        e22[tag] = {"shell_m": round(ds, 4), "core_m": round(dc, 4), "ratio": round(ratio, 3),
+                    "end_len_m": end_len}
+    mode0 = layout.get("BEAM_MODE")
+    ends0 = {o.name: (tuple(o["p_start"]), tuple(o["p_end"])) for o in bpy.data.objects
+             if o.name.startswith("BEAM_") and "p_start" in o.keys()
+             and "_core" not in o.name and "_end" not in o.name}
+    d0 = {o.name: o["diameter"] for o in bpy.data.objects
+          if o.name.startswith("BEAM_") and "p_start" in o.keys()
+          and "_core" not in o.name and "_end" not in o.name}
+    core0 = {o.name: o["core_diameter"] for o in bpy.data.objects
+             if o.name.startswith("BEAM_") and "core_diameter" in o.keys()}
+    formation.set_beam_mode("realistic")
+    ends1 = {o.name: (tuple(o["p_start"]), tuple(o["p_end"])) for o in bpy.data.objects
+             if o.name.startswith("BEAM_") and "p_start" in o.keys()
+             and "_core" not in o.name and "_end" not in o.name}
+    d1 = {o.name: o["diameter"] for o in bpy.data.objects
+          if o.name.startswith("BEAM_") and "p_start" in o.keys()
+          and "_core" not in o.name and "_end" not in o.name}
+    core1 = {o.name: o["core_diameter"] for o in bpy.data.objects
+             if o.name.startswith("BEAM_") and "core_diameter" in o.keys()}
+    path_same = ends0 == ends1 and d0 == d1
+    core_halved = all(abs(core1[k] - core0[k] / 2) <= 1e-6 for k in core0)
+    mode_ok = (mode0 == "illustration") and layout.get("BEAM_MODE") == "realistic"
+    e22_args = ("E22", "光束双层结构＋双模式：四束均为外壳晕＋亮芯（芯径＝壳径/3±20%）＋两端点增亮段"
+                       "（≤0.15 m）；BEAM_MODE 默认 illustration、可切 realistic；两模式光路几何一致",
+                e22_ok and path_same and core_halved and mode_ok,
+                f"逐束={e22}；默认模式={mode0}→切换后={layout.get('BEAM_MODE')}；"
+                f"端点/壳径两模式一致={path_same}；realistic 芯径减半={core_halved}")
+
+    # ---- E21 分离路径无碰撞（v1.4 增）：组合体布局上集光器沿 +Z 直提 ----
+    import assembly as ASM
+    ASM.build()                                          # 重建组合体布局（其后编队场景即拆掉）
+    formation.C.refresh()
+    module = find("cmbmod_module")
+    others = [o for o in bpy.data.objects
+              if o.type == "MESH" and not o.name.startswith(("colA_", "colB_"))]
+    sep_rows, sep_ok, min_gap = [], True, 1e9
+    tgt = bvh(others)
+    for t in ("colA", "colB"):
+        holder = find(t + "_ROOT")
+        group = [o for o in bpy.data.objects if o.name.startswith(t + "_") and o.type == "MESH"]
+        gl, gh = bb(group)
+        ml, mh = bb([module])
+        gap = min(min(abs(gl[0] - mh[0]), abs(ml[0] - gh[0])),
+                  min(abs(gl[1] - mh[1]), abs(ml[1] - gh[1])))
+        min_gap = min(min_gap, gap)
+        z0 = holder.location.z
+        hit = False
+        for i in range(1, 21):        # 从 0.1 m 起：dz=0 是法兰贴合面，不算扫掠相交
+            holder.location.z = z0 + i * 0.10
+            bpy.context.view_layer.update()
+            if bvh(group).overlap(tgt):
+                hit = True
+                break
+        holder.location.z = z0
+        bpy.context.view_layer.update()
+        sep_ok = sep_ok and not hit
+        sep_rows.append(f"{t}:横向与载荷舱间隙 {gap:.3f} m；+Z 直提 2.0 m 扫掠{'相交' if hit else '无相交'}")
+    sep = {"path": "+Z 直提 2.0 m（0.1 m 步进网格相交核验）", "min_gap_to_module_m": round(min_gap, 3),
+           "rows": sep_rows, "ok": sep_ok}
+    check("E21", "分离路径无碰撞：集光器沿 +Z 直提离位，全程与载荷舱/平台舱/收拢翼摞无扫掠相交；"
+                 "最小间隙记入 report",
+          sep_ok, "；".join(sep_rows))
+    check(*e22_args)                      # E22 数据在编队场景里采集，判据行按清单顺序排在 E21 之后
+
+    report["wing_E20"] = e20
+    report["beam_E22"] = e22
+    report["separation_E21"] = sep
+    with open(REPORT, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    print("[verify] 报告一次写出：%s" % os.path.relpath(REPORT, HERE), flush=True)
 
 
 def report():

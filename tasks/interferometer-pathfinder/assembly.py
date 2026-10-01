@@ -30,6 +30,7 @@ if HERE not in sys.path:
 
 import collector as C
 import combiner as M
+import wing as W
 
 OUT_DIR = os.path.join(HERE, "out", "assembly")
 
@@ -39,7 +40,7 @@ OUT_DIR = os.path.join(HERE, "out", "assembly")
 # 平面取矩形——规格未规定形状，矩形最不易被误认成平板/梁件。
 BAY_W = 1.24
 BAY_L = 3.60
-BAY_T = 0.50
+BAY_T = 0.90
 BAY_BEVEL = 0.06
 BAY_TOP = 0.0          # 顶面取 z=0，其余构件以此为基准
 
@@ -100,19 +101,18 @@ def build_bay():
 
 
 def build_bay_fittings():
-    """平台舱的附件：展开的太阳翼（仅此一副）与 ±X 侧面的储箱。
+    """平台舱的附件：**展开的太阳翼**（SADA＋4 板，法向朝尾部 −Z）与 ±X 侧面储箱。
 
-    太阳翼由 collector.build_panels() 生成（按单体舱的 ±X 斜面定位），这里把它们
-    沿 X 外移到平台舱的 ±X 面上（平台舱宽 1.24 > 单体舱宽 1.20）。
+    翼机构由 wing.py 生成（阶段三/四同一份实现）；这里把翼根放到平台舱的 ±X 面上
+    （平台舱宽 1.24 > 单体舱宽 1.20）。
     """
-    shift = BAY_W / 2 - (C.BUS_W / 2 - C.PANEL_FLUSH)   # 外移量
-    panels, _ = C.build_panels()                        # 展开态
-    for p in panels:
-        p.location.x += math.copysign(shift, p.location.x)
+    wings = []
+    for side in (+1.0, -1.0):
+        wings += W.build_wing(side, BAY_W / 2, state="deployed")
     tanks = C.build_tanks(face="X±")
-    # 挂在平台舱中层高度：单体构件以舱心为原点，平台舱中层即 BAY_TOP − BAY_T/2
-    _group(panels + tanks, "cmb", (0.0, 0.0, BAY_TOP - BAY_T / 2), 0.0)
-    return panels + tanks
+    # 挂到平台舱中层高度：单体构件以舱心为原点，平台舱中层即 BAY_TOP − BAY_T/2
+    _group(wings + tanks, "cmb", (0.0, 0.0, BAY_TOP - BAY_T / 2), 0.0)
+    return wings + tanks
 
 
 def build_collector(prefix, y, rot_z_deg):
@@ -120,8 +120,8 @@ def build_collector(prefix, y, rot_z_deg):
     objs = [C.build_bus(), C.build_tube()]
     objs += C.build_gimbals()
     objs += C.build_tanks()                    # 两只贴 +Y 长边（朝相邻器）
-    panels, _ = C.build_panels(stowed=True)    # 折叠平贴 ±X 侧面
-    objs += panels
+    for side in (+1.0, -1.0):                  # 收拢：4 板 Z 折成摞贴 ±X 舱板
+        objs += W.build_wing(side, (C.BUS_W + C.BUS_SHORT_W) / 4, state="stowed")
     objs.append(C.build_window())
     return _group(objs, prefix, (0.0, y, BAY_TOP + C.BUS_H / 2), rot_z_deg)
 
