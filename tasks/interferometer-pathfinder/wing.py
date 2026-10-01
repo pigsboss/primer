@@ -23,8 +23,9 @@ from mathutils import Vector
 import collector as C
 
 PANEL_N = 4                        # 每翼板数（0/1/2/3 号）
-PANEL_L = C.PANEL_L / PANEL_N      # 单板展向长＝等分原板长 0.45
-PANEL_W = C.PANEL_W                # 弦向宽 0.72
+PANEL_L = C.PANEL_L / PANEL_N      # A 类（合束器，链式 Z 折）：单板展向长＝原板长/4 = 0.45
+PANEL_W = C.PANEL_W                # A 类弦向宽 0.72
+PANEL_SQ = 0.57                    # B 类（集光器，十字）：方板边长 0.57（4×0.57²＝1.2996≈1.296 m²）
 PANEL_T = C.PANEL_T                # 厚 0.03
 PANEL_GAP = 0.006                  # 展开态板间缝
 ROOT_OUT = 0.050                   # 0 号板内缘相对舱面的外推量（SADA 必须落在舱面之外）
@@ -92,11 +93,13 @@ def _edge_frame(name, center, dims, mat, w=0.02):
     return _join(parts, name, mat)
 
 
-def build_wing(side, face_x, state="deployed", prefix="", z_plane=Z_PLANE):
+def build_wing(side, face_x, state="deployed", topology="chain", prefix="", z_plane=Z_PLANE):
     """建一翼：SADA＋4 板＋板间铰链×3。返回对象列表（世界坐标、未挂父级）。
 
     ``side`` ∈ {+1, −1}（±X 侧）；``face_x``＝该侧舱面的 |x|（梯形舱取 y=0 处半宽，
-    与 collector 的斜面一致）；``state`` ∈ {"deployed", "stowed"}。
+    与 collector 的斜面一致）；``state`` ∈ {"deployed", "stowed"}；
+    ``topology`` ∈ {"chain"（A 类，合束器：4 板 0.45×0.72 链式共线）,
+    "cross"（B 类，集光器：0 号方板居中，1/2/3 号方板铰接其相邻三边，展开成十字）}。
 
     命名（供阶段四的清单判据按名前缀清点）：
       ``panel_X1..X4``／``panel_-X1..-X4``、``SADA_X``／``SADA_-X``、
@@ -111,7 +114,36 @@ def build_wing(side, face_x, state="deployed", prefix="", z_plane=Z_PLANE):
     mech = _mat("MAT_up_grey", COL_MECH, 0.40, 1.0)
     out = []
 
-    if state == "deployed":
+    if state == "deployed" and topology == "cross":
+        # ── B 类十字（反馈 06 N1）：0 号根板居中，对边两板沿 ±Y（∥基线）、第三边板沿 +X 外伸；
+        #    展开轮廓十字：对边轴 1.71＝0.57×3、第三边轴 1.14＝0.57×2；板面法向 ±Z ──
+        base = _box("SADA_%s_base" % sx, (side * (face_x - 0.005), 0.0, z_plane), SADA_BASE, mech)
+        ball = _cyl("SADA_%s_ball" % sx, (side * (face_x + 0.030), 0.0, z_plane),
+                    (side, 0.0, 0.0), SADA_R, 0.045, mech, verts=24)
+        arm = _cyl("SADA_%s_arm" % sx, (side * (face_x + 0.055), 0.0, z_plane),
+                   (side, 0.0, 0.0), ARM_R, ARM_L, mech, verts=16)
+        out.append(_join([base, ball, arm], "SADA_%s" % sx, mech))
+        root_x = side * (face_x + ROOT_OUT + PANEL_SQ / 2)
+        slots = [("1", (root_x, 0.0, z_plane)),                       # 0 号根板（居中）
+                 ("2", (root_x, +PANEL_SQ, z_plane)),                 # 对边板（+Y）
+                 ("3", (root_x + side * PANEL_SQ, 0.0, z_plane)),     # 第三边板（+X 外伸）
+                 ("4", (root_x, -PANEL_SQ, z_plane))]                 # 对边板（−Y）
+        for i, (nm, c) in enumerate(slots):
+            out.append(_box("panel_%s%s" % (sx, nm), c, (PANEL_SQ, PANEL_SQ, PANEL_T), panel_mat))
+            out.append(_edge_frame("EDGE_%s%s" % (sx, nm), c, (PANEL_SQ, PANEL_SQ, PANEL_T), alu))
+            if i == 0:
+                continue                              # 0 号板无铰链；1/2/3 各自铰接其一条边
+            jx = (c[0] + (root_x - c[0]) / 2, c[1], z_plane)
+            axis = (0.0, 1.0, 0.0) if abs(c[1]) > 1e-6 else (0.0, 1.0, 0.0)
+            if abs(c[0] - root_x) > 1e-6:             # 第三边（+X）铰：轴线沿 Y
+                jx = ((c[0] + root_x) / 2, 0.0, z_plane)
+                axis = (0.0, 1.0, 0.0)
+            else:                                     # 对边（±Y）铰：轴线沿 X
+                jx = (root_x, (c[1] + 0.0) / 2, z_plane)
+                axis = (1.0, 0.0, 0.0)
+            out.append(_cyl("HINGE_%s0%d" % (sx, i), jx, axis, HINGE_R, HINGE_L * 1.6,
+                            mech, verts=16))
+    elif state == "deployed":
         # ── SADA：底座贴舱面 ＋ 球铰 ＋ 短臂，翼面在 z_plane 平面内、法向 −Z ──
         base = _box("SADA_%s_base" % sx, (side * (face_x - 0.005), 0.0, z_plane),
                     SADA_BASE, mech)
@@ -145,16 +177,18 @@ def build_wing(side, face_x, state="deployed", prefix="", z_plane=Z_PLANE):
                     (side, 0.0, 0.0), SADA_R, 0.045, mech, verts=24)
         out.append(_join([base, ball], "SADA_%s" % sx, mech))
         hinges = []
+        pw, pl = (PANEL_SQ, PANEL_SQ) if topology == "cross" else (PANEL_W, PANEL_L)
         for i in range(PANEL_N):
             cx = side * (face_x + 0.010 + PANEL_T / 2 + i * (PANEL_T + STACK_GAP))
             nm = "panel_%s%d" % (sx, i + 1)
-            p = _box(nm, (cx, 0.0, z_plane), (PANEL_T, PANEL_W, PANEL_L), panel_mat)
+            p = _box(nm, (cx, 0.0, z_plane), (PANEL_T, pw, pl), panel_mat)
             out.append(p)
             out.append(_edge_frame("EDGE_%s%d" % (sx, i + 1), (cx, 0.0, z_plane),
-                                   (PANEL_T, PANEL_W, PANEL_L), alu))
+                                   (PANEL_T, pw, pl), alu))
             if i < PANEL_N - 1:                       # 折缝铰链：在相邻两板之间、沿 Y
                 hx = side * (face_x + 0.010 + PANEL_T + STACK_GAP / 2 + i * (PANEL_T + STACK_GAP))
-                hz = z_plane + (PANEL_L / 2 - 0.02) * (1.0 if i % 2 == 0 else -1.0)
+                hz = z_plane + ((PANEL_SQ if topology == "cross" else PANEL_L) / 2 - 0.02) \
+                    * (1.0 if i % 2 == 0 else -1.0)
                 hinges.append(_cyl("HINGE_%s0%d" % (sx, i + 1), (hx, 0.0, hz),
                                    (0.0, 1.0, 0.0), HINGE_R, HINGE_L, mech, verts=16))
         out += hinges

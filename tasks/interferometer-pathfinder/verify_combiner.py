@@ -111,7 +111,7 @@ def main():
     mod_d = max(mod_dims[0], mod_dims[1])
     mod_lo, mod_hi = vbounds([module])
 
-    check("C2", "载荷舱外径/舱宽 ∈ [0.35,0.50]", 0.35 <= mod_d / bus_w <= 0.50, f"{mod_d / bus_w:.3f}")
+    check("C2", "载荷舱外径/舱宽 ∈ [0.35,0.60]（联动：分母为集合器舱 Y 宽，随反馈 07§三.3 修订）", 0.35 <= mod_d / bus_w <= 0.60, f"{mod_d / bus_w:.3f}")
     over = mod_hi[2] - bus_hi[2]
     check("C3", "载荷舱高出舱顶/舱高 ∈ [0.5,0.9]", 0.5 <= over / bus_h <= 0.9, f"{over / bus_h:.3f}")
     gap = mod_lo[2] - bus_hi[2]

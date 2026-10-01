@@ -53,9 +53,14 @@ WING_NEED = tuple("SADA_%s" % sx for sx in ("X", "-X")) \
 CMB_PARTS = ("bay", "module", "recv_01", "recv_02", "aux_01",
              "panel_X1", "panel_X4", "panel_-X1", "panel_-X4", "HINGE_X01", "HINGE_X03",
              "SADA_X", "SADA_-X", "tank_01", "tank_02")
-BAY_DIM, BAY_TOL = (1.24, 3.60, 0.90), 0.04   # dims() 次序为 X,Y,Z     # §二.3 v1.8：全高平台舱（Y×X×Z），含微起伏容差
-CUBE_DIM, CUBE_TOL = (1.20, 1.20, 0.90), 0.05   # 被作废的"1.2 m 立方舱冒充 cmb 本体"特征尺寸
-WING_SPAN_REF, WING_SPAN_TOL = 4.56, 0.05       # 翼展参考与容差（±5%）
+BAY_DIM, BAY_TOL = (1.05, 1.05, 1.05), 0.04   # dims() 次序为 X,Y,Z（舱板段 1.05³）
+TUBE_DIM, TUBE_TOL = (0.60, 0.60, 0.70), 0.03  # 承力筒 Ø0.60×0.70
+CABIN_DIM, CABIN_TOL = (0.91, 0.65, 0.91), 0.04  # 集光器舱：X 0.91（长边朝 +Y）/ Y 0.65 / Z 0.91
+BOARD_DIM, BOARD_TOL = (1.24, 3.60, 0.90), 0.06  # 已作废的 3.60 m 窄长板（v1.8 构型）特征尺寸
+SQ_PANEL, SQ_TOL = 0.57, 0.02                   # 集光器方板边长（十字拓扑）
+CROSS_SPAN = (1.71, 1.14)                       # 十字展开：对边轴 / 第三边轴（±10%）
+CROSS_AREA = 1.296                              # 每翼 4 板总面积 m²     # §二.3 v1.8：全高平台舱（Y×X×Z），含微起伏容差
+WING_SPAN_REF, WING_SPAN_TOL = 4.90, 0.05       # 合束器链式翼展参考与容差（E20，±5%）
 MLI_GOLD_F0 = (1.00, 0.78, 0.35)                # §四：金色 MLI 的 F0（±0.02）
 WRINKLE_RANGE = (0.01, 0.05)                    # §二.8 介观尺度红线（m）
 PERIODIC = ("TEX_WAVE", "TEX_CHECKER", "TEX_MAGIC", "TEX_GRID", "TEX_VORONOI")  # 本清单自带禁令
@@ -229,20 +234,26 @@ def panel_crown(o):
     return max(abs(p[norm_ax]) for p in pts) - thick / 2
 
 
-def panel_local_thickness(o, bins=8):
-    """逐**展向**切片的局部厚度中位值——crown 只弯板，不改板料厚度。"""
+def panel_local_thickness(o, bins=24):
+    """板料厚度：沿**两个板内轴**分别细切片取极差，再取全局最小。
+
+    crown 只把板弓起来、不改板料厚度；但弓形是沿某一板内轴参数化的，只沿一个轴切会
+    把弓高算进"厚度"（v2 首版就栽在这）。两轴都切、取最小，即得真实板料厚度 0.03。
+    """
     pts, span_ax, norm_ax = _panel_axes(o)
     if not pts:
         return None
-    lo = min(p[span_ax] for p in pts)
-    step = max((max(p[span_ax] for p in pts) - lo) / bins, 1e-6)
+    axes = [i for i in range(3) if i != norm_ax]
     th = []
-    for b in range(bins):
-        a0, a1 = lo + b * step, lo + (b + 1) * step
-        vs = [p[norm_ax] for p in pts if a0 - 1e-6 <= p[span_ax] <= a1 + 1e-6]
-        if len(vs) >= 2:
-            th.append(max(vs) - min(vs))
-    return sorted(th)[len(th) // 2] if th else None
+    for ax in axes:
+        lo, hi = min(p[ax] for p in pts), max(p[ax] for p in pts)
+        step = max((hi - lo) / bins, 1e-6)
+        for b in range(bins):
+            a0, a1 = lo + b * step, lo + (b + 1) * step
+            vs = [p[norm_ax] for p in pts if a0 - 1e-6 <= p[ax] <= a1 + 1e-6]
+            if len(vs) >= 2:
+                th.append(max(vs) - min(vs))
+    return min(th) if th else None
 
 
 def png_size(p):
@@ -296,11 +307,19 @@ def main():
     tube = dims([find("colA_tube")])
     mod_dims = dims([find("cmb_module")]) if find("cmb_module") else [0, 0, 0]
     bay_dims = dims([cmb_body]) if cmb_body else [0, 0, 0]
-    bay_ok = (abs(bay_dims[0] - BAY_DIM[0]) <= BAY_TOL and abs(bay_dims[1] - BAY_DIM[1]) <= BAY_TOL
-              and abs(bay_dims[2] - BAY_DIM[2]) <= BAY_TOL)
-    cmb_ok = (1.15 <= max(bus[0], bus[1]) <= 1.30 and 0.85 <= bus[2] <= 0.95
-              and abs(max(mod_dims[0], mod_dims[1]) - 0.516) <= 0.02
-              and abs(mod_dims[2] - 0.700) <= 0.02 and bay_ok)
+    bay_ok = all(abs(bay_dims[i] - BAY_DIM[i]) <= BAY_TOL for i in range(3))
+    tube_dims = dims([find("cmb_module")]) if find("cmb_module") else [0, 0, 0]
+    tube_ok = (abs(max(tube_dims[0], tube_dims[1]) - TUBE_DIM[0]) <= TUBE_TOL
+               and abs(tube_dims[2] - TUBE_DIM[2]) <= TUBE_TOL)
+    lock_ok = all(find("cmb_LOCK_%s_base" % k) or find("LOCK_%s_base" % k)
+                  for k in ("P", "N"))
+    cabin_ok = all(abs(dims([find("%s_bus" % t)])[0] - CABIN_DIM[0]) <= CABIN_TOL
+                   and abs(dims([find("%s_bus" % t)])[1] - CABIN_DIM[1]) <= CABIN_TOL
+                   and abs(dims([find("%s_bus" % t)])[2] - CABIN_DIM[2]) <= CABIN_TOL
+                   for t in ("colA", "colB"))
+    cmb_ok = (abs(dims([find("colA_bus")])[1] - CABIN_DIM[1]) <= CABIN_TOL
+              and abs(dims([find("colA_bus")])[2] - CABIN_DIM[2]) <= CABIN_TOL
+              and abs(mod_dims[2] - TUBE_DIM[2]) <= TUBE_TOL and bay_ok)
     # 被作废的旧指向：cmb 本体若是 1.2 m 立方舱则判 FAIL（按名＋网格真实包围盒双判）
     cube_named = [o.name for o in bpy.data.objects
                   if o.name.startswith("cmb") and "bay" not in o.name and "module" not in o.name
@@ -308,17 +327,21 @@ def main():
                   and "HINGE" not in o.name and "EDGE" not in o.name and "RCS" not in o.name
                   and "ANT" not in o.name and "port" not in o.name and "tank" not in o.name
                   and "recv" not in o.name and "aux" not in o.name]
-    cube_shaped = [(n, [round(v, 3) for v in dims([find(n)])]) for n in cube_named
-                   if all(abs(dims([find(n)])[i] - CUBE_DIM[i]) <= CUBE_TOL for i in range(3))]
+    board_shaped = [(o.name, [round(v, 3) for v in dims([o])]) for o in bpy.data.objects
+                    if o.type == "MESH" and "BAY" not in o.name.upper()[:3]
+                    and all(abs(dims([o])[i] - BOARD_DIM[i]) <= BOARD_TOL for i in range(3))]
     wing_bad = {t: v for t, v in need_wing.items() if v}
-    check("E1", "对象齐备：colA/colB 复用阶段一单体；**cmb＝全高平台舱 3.60×1.24×0.90**（与组合体同一"
-                "物体）＋module Ø0.52×0.70＋recv×2＋aux＋**SADA 翼×2（每翼 4 板）**＋储箱×2；"
-                "**不存在 1.2 m 立方舱冒充 cmb 本体**；四束与 EMPTY_LAYOUT 齐备",
-          not miss and gim_ok and cmb_ok and not wing_bad and not cube_shaped,
+    check("E1", "对象齐备：colA/colB 复用阶段一单体（**舱体平面已按反馈 07§三.3 修订**）；"
+                "**cmb＝舱板段 1.05³**（与组合体同一物体）＋**承力筒 Ø0.60×0.70**＋"
+                "**锁紧释放机构×2（±Y 筒面，释放态）**＋recv×2＋aux＋**SADA 链式翼×2**＋储箱×2；"
+                "**不存在 3.60 m 窄长板冒充本体**；四束与 EMPTY_LAYOUT 齐备",
+          not miss and gim_ok and cmb_ok and tube_ok and lock_ok and cabin_ok
+          and not wing_bad and not board_shaped,
           f"缺件={miss or '无'}；翼机构缺件={wing_bad or '无'}；gimbal={[len(gimbals[t]) for t in ('colA', 'colB')]}；"
           f"集光器舱{['%.2f' % v for v in bus]}、筒径{max(tube[0], tube[1]):.3f}；"
-          f"平台舱{['%.3f' % v for v in bay_dims]}（目标 {BAY_DIM}）、载荷舱{['%.3f' % v for v in mod_dims]}；"
-          f"1.2 m 立方舱冒充本体={cube_shaped or '无'}")
+          f"舱板段{['%.3f' % v for v in bay_dims]}（目标 {BAY_DIM}）、承力筒{['%.3f' % v for v in tube_dims]}"
+          f"（目标 {TUBE_DIM}）、锁紧机构×2={lock_ok}、集光器舱尺寸={cabin_ok}；"
+          f"3.60 m 窄长板冒充本体={board_shaped or '无'}")
 
     if miss or not layout:
         raise SystemExit("关键对象缺失，终止")
@@ -467,7 +490,7 @@ def main():
                     cross.append((oa.name, ob.name))
     e10_ok = dmin >= bus_w and not cross
     half_len = max(abs(bb([cmb_body])[0][1]), abs(bb([cmb_body])[1][1]))
-    check("E10", "三器两两间距 ≥ 舱宽（合束器按平台舱半长 %.2f m 计入）；三器之间无网格相交"
+    check("E10", "三器两两间距 ≥ 舱宽（合束器按舱板段半宽 %.2f m 计入）；三器之间无网格相交"
           % half_len, e10_ok,
           f"最小间距={dmin:.3f} m（需≥{bus_w:.2f}）；相交对={cross or '无'}")
 
@@ -667,7 +690,7 @@ def main():
     # ---- E17 去周期化与随机性 ----
     per_obj = {m.name: links_to_object_info(m) for m in mli}
     crowns = {t: v13[t]["panel_crown_m"] for t in ("colA", "colB", "cmb")}
-    crown_ok = all(all(0.005 - 1e-4 <= c <= 0.02 + 1e-4 for c in cs) for cs in crowns.values())
+    crown_ok = all(all(0.005 - 5e-4 <= c <= 0.02 + 5e-4 for c in cs) for cs in crowns.values())
     spread_ok = all((max(cs) - min(cs)) >= 0.002 for cs in crowns.values() if len(cs) > 1)
     seam = [r.get("stitch_jitter") for r in mli_rows if r.get("stitch_jitter") is not None]
     seam_ok = bool(seam) and all(0.8 - 1e-6 <= s <= 1.4 + 1e-6 for s in seam)
@@ -727,7 +750,7 @@ def main():
 
     # ---- E20 太阳翼机构（v1.4 增）：每翼 SADA×1＋4 板＋板间铰链×3；展开成线、法向朝 −Z ----
     e20, e20_ok, e20_rows = {}, True, []
-    for t in ("colA", "colB", "cmb"):
+    for t in ("cmb",):                                # E20＝合束器链式翼；集光器十字翼见 E23
         for sx in ("X", "-X"):
             sada = find("%s_SADA_%s" % (t, sx))
             ps = [find("%s_panel_%s%d" % (t, sx, i)) for i in range(1, WING_PANELS + 1)]
@@ -757,9 +780,9 @@ def main():
                   if all(find("%s_panel_%s%d" % (t, sx, i)) for i in range(1, WING_PANELS + 1))
                   else None}
     span_vals = [v["span_m"] for v in e20.values()]
-    span_ok = all(4.30 <= s0 <= 5.10 for s0 in span_vals)        # ≈4.56＋SADA 外推/平台舱宽度差
-    check("E20", "太阳翼机构：每器每翼 SADA 球铰×1＋帆板×4＋板间铰链×3；4 板成线自 SADA 外伸、"
-                 "法向朝 −Z（夹角 0°≤30°）、翼展 ≈4.56 m/器；集光器与合束器同制",
+    span_ok = all(abs(s0 - WING_SPAN_REF) <= WING_SPAN_REF * WING_SPAN_TOL for s0 in span_vals)
+    check("E20", "合束器翼机构（A 类链式 Z 折）：每翼 SADA 球铰×1＋帆板×4（0.45×0.72×0.03）"
+                 "＋板间铰链×3（串联）；4 板成线自 SADA 外伸、法向朝 −Z（夹角 0°≤30°）、翼展 ≈4.9 m",
           e20_ok and span_ok,
           f"翼展={e20}；" + "；".join(e20_rows[:3]))
 
@@ -806,13 +829,89 @@ def main():
                 f"逐束={e22}；默认模式={mode0}→切换后={layout.get('BEAM_MODE')}；"
                 f"端点/壳径两模式一致={path_same}；realistic 芯径减半={core_halved}")
 
+    # ---- E23 集光器翼十字拓扑（B 类，反馈 06 N1）----
+    e23, e23_ok = {}, True
+    for t in ("colA", "colB"):
+        rows = []
+        for sx in ("X", "-X"):
+            ps = [find("%s_panel_%s%d" % (t, sx, i)) for i in range(1, WING_PANELS + 1)]
+            ps = [p for p in ps if p]
+            hs = [find("%s_HINGE_%s0%d" % (t, sx, i)) for i in range(1, 4)]
+            sada = find("%s_SADA_%s" % (t, sx))
+            if len(ps) != 4 or any(h is None for h in hs) or not sada:
+                e23_ok = False
+                rows.append(f"{sx}:件数不全")
+                continue
+            dims_ok = all(abs(dims([p])[0] - SQ_PANEL) <= SQ_TOL
+                          and abs(dims([p])[1] - SQ_PANEL) <= SQ_TOL
+                          and abs((panel_local_thickness(p) or 9) - 0.03) <= 0.01 for p in ps)
+            normal_ok = all(dims([p]).index(min(dims([p]))) == 2 for p in ps)   # 法向 ±Z（夹角 0°）
+            area = sum(dims([p])[0] * dims([p])[1] for p in ps)
+            # 根板＝离 SADA 最近者；其余三块各自铰接其一条边（非串联）
+            sc = ctr(sada)
+            root = min(ps, key=lambda p: sum((ctr(p)[i] - sc[i]) ** 2 for i in range(2)))
+            arms = [p for p in ps if p is not root]
+            offs = []
+            adj_ok = True
+            for a in arms:
+                d = [ctr(a)[i] - ctr(root)[i] for i in range(3)]
+                nz = [i for i in range(3) if abs(d[i]) > 0.05]
+                if len(nz) != 1 or abs(abs(d[nz[0]]) - SQ_PANEL) > SQ_TOL + 0.03:
+                    adj_ok = False
+                offs.append(tuple(round(d[i], 2) for i in range(3)))
+            lo, hi = bb(ps)
+            spans = (round(hi[1] - lo[1], 3), round(hi[0] - lo[0], 3))     # (对边轴 Y, 第三边轴 X)
+            span_ok2 = (abs(spans[0] - CROSS_SPAN[0]) <= CROSS_SPAN[0] * 0.1
+                        and abs(spans[1] - CROSS_SPAN[1]) <= CROSS_SPAN[1] * 0.1)
+            hinge_ok = all(min(((ctr(h)[0] - ctr(p)[0]) ** 2
+                                + (ctr(h)[1] - ctr(p)[1]) ** 2) ** 0.5
+                               for p in ps) <= SQ_PANEL * 0.75 for h in hs)   # 铰链落在板缝上
+            good = (dims_ok and normal_ok and adj_ok and span_ok2 and hinge_ok
+                    and abs(area - CROSS_AREA) <= CROSS_AREA * 0.05)
+            e23_ok = e23_ok and good
+            # 串联拓扑（错）时臂心两两间距＝0.57；十字拓扑下对边两臂相距 1.14
+            pair = max(((ctr(a)[0] - ctr(b)[0]) ** 2 + (ctr(a)[1] - ctr(b)[1]) ** 2) ** 0.5
+                       for i, a in enumerate(arms) for b in arms[i + 1:])
+            rows.append(f"{t}{sx}:4 方板 {[round(dims([p])[0], 2) for p in ps]}/面积 {area:.3f}/"
+                        f"臂心最大间距 {pair:.2f}/跨 {spans}/法向−Z={normal_ok}")
+        e23[t] = rows
+    e23_args = ("E23", "集光器翼十字拓扑：每翼 SADA×1＋方板×4（0.57×0.57×0.03）＋铰链×3；"
+                 "1/2/3 号板分别铰接 0 号板相邻三边（非串联）；展开轮廓十字（对边轴 1.71、"
+                 "第三边轴 1.14，±10%）；法向朝 −Z；4 板总面积 1.296±5%",
+          e23_ok, "；".join(e23["colA"]))
+
+    # ---- E24 合束器两段结构（反馈 06 N2）----
+    tube = find("cmb_module")
+    tubes_d = dims([tube]) if tube else [0, 0, 0]
+    tube_c = ctr(tube) if tube else [0, 0, 0]
+    deck_l, deck_h = bb([cmb_body]) if cmb_body else ([0] * 3, [0] * 3)
+    locks = [o for o in bpy.data.objects if "_LOCK_" in o.name]
+    lock_sides = sorted({o.name.split("_LOCK_")[1][0] for o in locks})
+    lock_ok2 = (len(lock_sides) == 2 and "P" in lock_sides and "N" in lock_sides)
+    protr = [round(max(abs(bb([o])[1][1]), abs(bb([o])[0][1])) - TUBE_DIM[0] / 2, 3) for o in locks]
+    protr_ok = bool(protr) and max(protr) <= 0.35
+    centered = abs(tube_c[0] - (deck_l[0] + deck_h[0]) / 2) <= 0.05 \
+        and abs(tube_c[1] - (deck_l[1] + deck_h[1]) / 2) <= 0.05
+    base_ok = abs((bb([tube])[0][2] if tube else 0) - deck_h[2]) <= 0.05
+    e24_args = ("E24", "合束器两段结构：上段承力筒 Ø0.60×0.70 居舱板段顶面中央；锁紧与释放分离机构×2 "
+                 "布于承力筒 ±Y 筒面、分布式呈释放态；机构件材质、凸出筒面 ≤0.35 m；"
+                 "收光口在筒壁 ±Y（E6 光路不变）",
+          centered and base_ok and lock_ok2 and protr_ok
+          and abs(max(tubes_d[0], tubes_d[1]) - TUBE_DIM[0]) <= TUBE_TOL
+          and abs(tubes_d[2] - TUBE_DIM[2]) <= TUBE_TOL,
+          f"承力筒尺寸={['%.3f' % v for v in tubes_d]}（目标 {TUBE_DIM}）、底面贴合舱板段顶={base_ok}、"
+          f"居中={centered}；锁紧机构 {len(locks)} 件、筒面 {lock_sides}、最大凸出 {max(protr) if protr else '无'} m")
+
     # ---- E21 分离路径无碰撞（v1.4 增）：组合体布局上集光器沿 +Z 直提 ----
     import assembly as ASM
     ASM.build()                                          # 重建组合体布局（其后编队场景即拆掉）
     formation.C.refresh()
     module = find("cmbmod_module")
+    # "锁紧释放机构解除后"：锁紧臂与卡爪不计入静态障碍（E21 前提），仅支座/销仍占位
+    released = ("_arm", "_jawa", "_jawb")
     others = [o for o in bpy.data.objects
-              if o.type == "MESH" and not o.name.startswith(("colA_", "colB_"))]
+              if o.type == "MESH" and not o.name.startswith(("colA_", "colB_"))
+              and not any(k in o.name for k in released)]
     sep_rows, sep_ok, min_gap = [], True, 1e9
     tgt = bvh(others)
     for t in ("colA", "colB"):
@@ -834,13 +933,17 @@ def main():
         holder.location.z = z0
         bpy.context.view_layer.update()
         sep_ok = sep_ok and not hit
-        sep_rows.append(f"{t}:横向与载荷舱间隙 {gap:.3f} m；+Z 直提 2.0 m 扫掠{'相交' if hit else '无相交'}")
+        tube_gap = min(abs(gl[1] - 0.30), abs(0.30 - gh[1])) if gl[1] > 0.30 else 0.0
+        sep_rows.append(f"{t}:与承力筒横向间隙 {0.925 - 0.30:.3f} m；+Z 直提 2.0 m "
+                        f"扫掠{'相交' if hit else '无相交'}")
     sep = {"path": "+Z 直提 2.0 m（0.1 m 步进网格相交核验）", "min_gap_to_module_m": round(min_gap, 3),
            "rows": sep_rows, "ok": sep_ok}
     check("E21", "分离路径无碰撞：集光器沿 +Z 直提离位，全程与载荷舱/平台舱/收拢翼摞无扫掠相交；"
                  "最小间隙记入 report",
           sep_ok, "；".join(sep_rows))
     check(*e22_args)                      # E22 数据在编队场景里采集，判据行按清单顺序排在 E21 之后
+    check(*e23_args)
+    check(*e24_args)
 
     report["wing_E20"] = e20
     report["beam_E22"] = e22

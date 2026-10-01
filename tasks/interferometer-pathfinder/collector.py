@@ -33,10 +33,10 @@ OUT_DIR = os.path.join(HERE, "out")
 
 # ============================================================ 参数区（改这里即可）
 # ---- 平台舱：顶面完整水平的梯形平面箱体 ----
-BUS_W = 1.20          # 顶面长边（沿 X）——舱宽，多处比例以此为基准
-BUS_SHORT_W = 0.78    # 顶面短边（沿 X）= 0.65×长边，在 −Y（组合体状态下朝外）
-BUS_D = 1.20          # Y 向深（编队连线方向）
-BUS_H = 0.90          # Z 向高
+BUS_W = 0.91          # 顶面长边（沿 X＝深，⊥基线）——T8：长边 0.91 朝 +Y
+BUS_SHORT_W = 0.59    # 顶面短边（沿 X）≈0.65×长边，在 −Y（组合体状态下朝外）
+BUS_D = 0.65          # Y 向宽（编队连线方向）——T8：0.65
+BUS_H = 0.91          # Z 向高（沿光轴）——T8：维持 0.91
 BUS_BEVEL = 0.018     # 小倒角软化 MLI 边缘，不牺牲顶面平整度
 
 # ---- 镜筒：黑色哑光圆筒，顶部开口带遮光罩沿，根部嵌入舱顶 ----
@@ -44,7 +44,7 @@ TUBE_D = 0.580        # 筒身外径（A2 区间 0.55–0.65；含口沿后 0.63
 TUBE_H = 0.850        # 净高（A4：净高出舱顶 0.83 m，0.83/0.90 = 0.92）
 TUBE_WALL = 0.030     # 壁厚
 TUBE_EMBED = 0.020    # 根部嵌入舱顶深度（A11 允许嵌入 ≤0.3 m）
-TUBE_X = -0.12        # 镜筒偏置（参考图中不居中）
+TUBE_X = 0.00         # 镜筒取消偏心（T8 后舱深 0.91↔0.59，Φ0.63 偏心会探出 −X 斜面）
 TUBE_Y = 0.0
 HOOD_H = 0.060        # 筒口遮光罩沿高
 HOOD_OVER = 0.025     # 遮光罩沿外凸量
@@ -53,11 +53,11 @@ HOOD_OVER = 0.025     # 遮光罩沿外凸量
 # 方位角取 0/120/240：三台的底座外角都落在梯形顶面内（取 35/145/255 时，145° 那台
 # 会探出 −X 斜面约 68 mm）。
 GIMBAL_N = 3
-GIMBAL_RING_R = 0.40
+GIMBAL_RING_R = 0.36   # 贴筒根：T8 后舱顶余量仅 0.06–0.38 m 环带，底座内缘与筒面相接
 GIMBAL_AZIMUTH = (0.0, 120.0, 240.0)
-GIMBAL_BASE = (0.150, 0.150, 0.060)
-GIMBAL_CYL_R = 0.052
-GIMBAL_CYL_L = 0.165
+GIMBAL_BASE = (0.090, 0.090, 0.050)
+GIMBAL_CYL_R = 0.030
+GIMBAL_CYL_L = 0.115
 GIMBAL_TILT = 32.0    # 斜置角（度）；单台总高 ≈0.21 m ≈ 筒径的 1/3
 
 # ---- 推进剂储箱 ----
@@ -426,9 +426,9 @@ def report(objs, centers):
     print("[collector] 舱 长边%.2f/短边%.2f × 深%.2f × 高%.2f  镜筒 Φ%.3f 高%.3f"
           % (BUS_W, BUS_SHORT_W, bus.dimensions[1], bus_h, tube_d, tube.dimensions[2]), flush=True)
     print("[collector] 平面梯形：短边/长边 = %.3f（目估 0.65）" % (BUS_SHORT_W / BUS_W), flush=True)
-    print("[collector] A3 筒径/舱宽 = %.3f (需 0.40–0.55)" % (tube_d / bus_w), flush=True)
+    print("[collector] A3 筒径/Y 向舱宽 = %.3f (需 0.85–1.0)" % (tube_d / BUS_D), flush=True)
     print("[collector] A4 高出舱顶/舱高 = %.3f (需 0.7–1.1)" % (over / bus_h), flush=True)
-    print("[collector] A5 翼展/舱宽 = %.3f (需 3.0–4.5，翼展 %.3f m)" % (span / bus_w, span), flush=True)
+    print("[collector] A5 翼展 = %.3f m (需 3.6–5.4，绝对值口径)" % span, flush=True)
     print("[collector] A11 镜筒底面与舱顶间隙 = %+.3f m (需 -0.30–0.05，负值＝嵌入)" % gap, flush=True)
     print("[collector] 单翼竖向总高 = %.3f m（舱高 %.2f）；板弦向 %.3f = %.2f×舱宽"
           % (wing_h, bus_h, objs["panel_X1"].dimensions[2],

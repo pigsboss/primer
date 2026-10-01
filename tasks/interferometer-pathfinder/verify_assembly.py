@@ -29,7 +29,8 @@ LOG = os.path.join(OUT, "verify_log.txt")
 
 ENV_R, ENV_H = 1.825, 4.610
 EXEMPT = ("tube", "module", "gimbal", "recv", "aux", "panel", "window", "tank",
-          "sada", "hinge", "edge", "SADA", "HINGE", "EDGE")   # v1.1：太阳翼机构（SADA/板间铰链/翼缘）豁免
+          "sada", "hinge", "edge", "SADA", "HINGE", "EDGE",
+          "lock", "LOCK")   # v1.1/1.3：太阳翼机构与锁紧释放机构均属机构件豁免
 FORBIDDEN_NAME = ("deck", "beam", "truss", "plate")
 results = []
 
@@ -137,15 +138,31 @@ def main():
     bay_dim_ok = False
     if bay:
         bd = vdims([bay])
-        bay_dim_ok = (abs(bd[0] - 1.24) <= 0.03 and abs(bd[1] - 3.60) <= 0.03
-                      and abs(bd[2] - 0.90) <= 0.03)      # v1.1 勘误：全高 0.90
+        bay_dim_ok = all(abs(bd[i] - 1.05) <= 0.04 for i in range(3))   # v1.3：舱板段 1.05³
+    mod_ok = False
+    if module:
+        md = vdims([module])
+        mod_ok = (abs(max(md[0], md[1]) - 0.60) <= 0.03 and abs(md[2] - 0.70) <= 0.03)
+    lock_ok = all(find("cmblock_LOCK_%s_base" % k) for k in ("P", "N"))
+    bus_dim_ok = True
+    for t in ("colA", "colB"):
+        b = buses.get(t)
+        if not b:
+            bus_dim_ok = False
+            continue
+        d = vdims([b])
+        bus_dim_ok = bus_dim_ok and abs(d[0] - 0.91) <= 0.04 and abs(d[1] - 0.65) <= 0.04 \
+            and abs(d[2] - 0.91) <= 0.04                       # v1.3：集光器舱平面修订
     by_name = [o.name for o in meshes if any(k in o.name.lower() for k in FORBIDDEN_NAME)]
     struct = [o for o in meshes if not any(k in o.name for k in EXEMPT)]
     thin = [(o.name, round(min(vdims([o])), 3)) for o in struct if min(vdims([o])) <= 0.08]
-    check("D1", "对象齐备（含翼机构：每翼 SADA×1＋4 板＋板间铰链×3）且无独立连接件；平台舱＝3.60×1.24×0.90",
-          not miss and not missing_cmb and not by_name and not thin and bay_dim_ok,
+    check("D1", "对象齐备（含翼机构：每翼 SADA×1＋4 板＋板间铰链×3）且无独立连接件；舱板段＝1.05³＋承力筒 Ø0.60",
+          not miss and not missing_cmb and not by_name and not thin and bay_dim_ok
+          and mod_ok and lock_ok and bus_dim_ok,
           f"缺件={miss + missing_cmb or '无'}；按名命中={by_name or '无'}；薄板类结构件={thin or '无'}；"
-          f"平台舱尺寸={'ok' if bay_dim_ok else (vdims([bay]) if bay else '缺 bay')}")
+          f"舱板段={'ok' if bay_dim_ok else vdims([bay]) if bay else '缺'}；"
+          f"承力筒={'ok' if mod_ok else vdims([module]) if module else '缺'}；"
+          f"锁紧机构×2={lock_ok}；集光器舱={'ok' if bus_dim_ok else 'BAD'}")
 
     if not (bay and all(buses.values()) and all(tubes.values()) and module):
         raise SystemExit("关键对象缺失，终止后续检查")
@@ -154,8 +171,8 @@ def main():
 
     # ---- D2 基线 ----
     ya, yb = vcenter(tubes["colA"])[1], vcenter(tubes["colB"])[1]
-    check("D2", "基线（两 tube 轴线 y 之差）∈ [2.3,2.6] m", 2.3 <= abs(ya - yb) <= 2.6,
-          f"baseline={abs(ya - yb):.3f} m")
+    check("D2", "基线（两 tube 轴线 y 之差）＝2.50±0.05 m（T9：入瞳中心距）",
+          2.45 <= abs(ya - yb) <= 2.55, f"入瞳中心距={abs(ya - yb):.3f} m")
 
     # ---- D3 对称居中 ----
     mc = vcenter(module)
@@ -170,9 +187,22 @@ def main():
     # 坐在平台舱顶面上的对象（按其所属件归并）
     sitters = sorted({owner(o.name) for o in meshes
                       if o is not bay and abs(vbounds([o])[0][2] - bay_hi[2]) <= 0.05})
-    check("D4", "两层支撑：两集光器舱底与载荷舱底直接贴合平台舱顶面；面上对象恰为 {集光器A,B,载荷舱}",
-          ok_gap and sitters == ["cmbmod", "colA", "colB"],
-          f"间隙={[round(g, 3) for g in gaps.values()]}+载荷舱{g_mod:+.3f}；面上件={sitters}")
+    hang = {}
+    for t in ("colA", "colB"):
+        bl, bh = vbounds([buses[t]])
+        hang[t] = round(min(abs(bl[1]), abs(bh[1])), 3)
+    hang_ok = all(v > bay_hi[1] for v in hang.values())          # 舱体悬于舱板段之外
+    arms = [find("cmblock_LOCK_%s_arm" % k) for k in ("P", "N")]
+    reach = [round(max(abs(vbounds([a])[0][1]), abs(vbounds([a])[1][1])), 3)
+             for a in arms if a] if all(arms) else []
+    spans = [round(r - 0.30, 3) for r in reach]           # 跨距＝臂外端 − 承力筒筒面(±0.30)
+    span_ok = bool(spans) and all(0.55 <= v <= 0.70 for v in spans)   # 跨距 ≈0.63
+    check("D4", "两层支撑与锁紧连接：集光器舱底与舱板段顶面等高（±0.05）；舱体悬于舱板段之外；"
+                "锁紧释放机构×2 各连承力筒筒面与一集光器舱内侧面（跨距 ≈0.63 m）；"
+                "面上对象恰为 {集光器A,B,承力筒}",
+          ok_gap and sitters == ["cmbmod", "colA", "colB"] and hang_ok and span_ok,
+          f"间隙={[round(g, 3) for g in gaps.values()]}+承力筒{g_mod:+.3f}；面上件={sitters}；"
+          f"舱内侧面={hang}（舱板段半宽 {round(bay_hi[1], 3)}）；锁紧跨距={spans}")
 
     # ---- D5 同层成排 ----
     dh = abs(vbounds([module])[1][2] - max(vbounds([buses[t]])[1][2] for t in ("colA", "colB")))

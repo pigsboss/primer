@@ -105,17 +105,19 @@ def main():
     # A2 镜筒口径
     check("A2", "镜筒外径 0.55–0.65 m", 0.55 <= tube_d <= 0.65, f"d={tube_d:.3f}")
     # A3 比例①
-    r1 = tube_d / bus_w
-    check("A3", "镜筒外径/舱宽 ∈ [0.40,0.55]", 0.40 <= r1 <= 0.55, f"{r1:.3f}")
+    bus_wide = bus_hi[1] - bus_lo[1]                 # A3 v1.1：分母改 Y 向舱宽（沿基线）
+    r1 = tube_d / bus_wide
+    check("A3", "镜筒外径/Y 向舱宽 ∈ [0.85,1.0]（宽度略大于筒直径）", 0.85 <= r1 <= 1.0,
+          f"筒径 {tube_d:.3f} / Y 向舱宽 {bus_wide:.3f} = {r1:.3f}")
     # A4 比例②（顶点法）
     r2 = (tube_hi[2] - bus_hi[2]) / bus_h
     check("A4", "镜筒顶面高出舱顶/舱高 ∈ [0.7,1.1]", 0.7 <= r2 <= 1.1, f"{r2:.3f}")
     # A5 比例③
     pt = [p for n, p in panels.items() if p]
     plo, phi = vbounds(pt)
-    r3 = (phi[0] - plo[0]) / bus_w
-    check("A5", "太阳翼展开总宽/舱宽 ∈ [3.0,4.5]", 3.0 <= r3 <= 4.5,
-          f"{r3:.3f}（翼展 {phi[0] - plo[0]:.3f} m）")
+    span_abs = phi[0] - plo[0]
+    check("A5", "太阳翼四板展开总宽 ∈ [3.6,5.4] m（绝对值口径，翼尺寸不随舱体修订变化）",
+          3.6 <= span_abs <= 5.4, f"翼展 {span_abs:.3f} m")
     # A6 材质色
     cb, ct = max_color(bus), max_color(tube)
     ck = max_color(tanks[0]) if tanks else None

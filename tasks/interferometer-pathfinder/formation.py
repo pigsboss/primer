@@ -781,36 +781,52 @@ def upgrade(objs, tag, has_tube):
 
 # ============================================================ 构件
 def build_cmb_parts():
-    """合束器＝**全高平台舱** 3.60×1.24×0.90（§二.3 v1.8）＋载荷舱＋SADA 翼×2＋储箱×2。
+    """合束器＝**两段结构**（反馈 06 N2／07 §三.1-2）：下段舱板段 1.05³ ＋上段承力筒 Ø0.60×0.70。
 
-    长宽沿用 assembly.py 的 BAY_L/BAY_W，高度 BAY_T 本轮联动勘误 0.50→0.90——**两状态同一物体**。
-    平台舱顶面落在 z=+0.45（与集光器舱顶同高）→ 收光口仍 ≈0.51，两状态光路同解（E18）。
-    collector.py／combiner.py 一行不动；载荷舱/储箱照旧复用 combiner/collector 的构件函数。
+    * 舱板段三向尺寸集中在 assembly.py 的 BAY_W/BAY_L/BAY_T（一处改处处改）；挂在 ±X 面的
+      SADA 链式翼×2 与 ±X 储箱×2；
+    * 承力筒＝module 筒身在 X/Y 缩放到外径 0.60、高度仍 0.70，筒内载荷不外显；±Y 筒面挂
+      **锁紧与释放分离机构×2**（分布式呈释放态）；
+    * 舱板段顶面在 z=+0.525（与集光器舱同层）——两状态同一物体。
     """
     bay = A.build_bay()
-    bay.location = (0.0, 0.0, 0.0)      # 以箱心为原点 ⇒ 顶面 +0.45（assembly 系里顶面在 z=0）
+    bay.location = (0.0, 0.0, 0.0)      # 以箱心为原点 ⇒ 顶面 +BAY_T/2
     parts = {"bay": bay}
-    grp = [M.build_module()] + M.build_recv() + [M.build_aux()]
+    mod = M.build_module()
+    f = A.TUBE_D_LOAD / max(mod.dimensions[0], mod.dimensions[1])
+    mod.scale = (f, f, 1.0)
+    bpy.context.view_layer.objects.active = mod
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    grp = [mod] + M.build_recv() + [M.build_aux()]
     lo = min(p[2] for p in _vlocal(grp))
-    for o in grp:                       # 载荷舱落平台舱顶面中央、根部嵌入 MODULE_EMBED
-        o.location = (o.location.x, o.location.y,
-                      o.location.z + ((A.BAY_T / 2 - A.MODULE_EMBED) - lo))
+    dz = (A.BAY_T / 2 - A.MODULE_EMBED) - lo
+    for o in grp:                       # 承力筒落舱板段顶面中央、根部嵌入 MODULE_EMBED
+        o.location = (o.location.x, o.location.y, o.location.z + dz)
     for o in grp:
         parts[o.name.split(".")[0]] = o
-    for side in (+1.0, -1.0):           # SADA 翼×2（展开，法向朝 −Z）
-        for o in W.build_wing(side, A.BAY_W / 2, state="deployed"):
+    mt = _vlocal([mod])
+    z_tube = (min(p[2] for p in mt) + max(p[2] for p in mt)) / 2      # 筒心高度
+    for side in (+1.0, -1.0):           # 锁紧释放机构×2（承力筒 ±Y 筒面，释放态）
+        for o in A.build_lock_mech(side, state="released"):
+            o.location = (o.location.x, o.location.y, o.location.z + z_tube)
+            parts[o.name.split(".")[0]] = o
+    for side in (+1.0, -1.0):           # SADA 链式翼×2（展开，法向朝 −Z）
+        for o in W.build_wing(side, A.BAY_W / 2, state="deployed", topology="chain"):
             parts[o.name.split(".")[0]] = o
     for t in C.build_tanks(face="X±"):
         parts[t.name.split(".")[0]] = t
     return parts
 
 
-def swap_wings(objs, face_x):
-    """把单体自带的翼板换成 wing.py 的 SADA＋4 板机构（§二.9 实施路径：单体文件一行不动）。"""
+def swap_wings(objs, face_x, topology="cross"):
+    """把单体自带的翼板换成 wing.py 的翼机构（实施路径：单体文件一行不动）。
+
+    集光器用 ``cross``（十字：0 号方板居中、1/2/3 号板铰接相邻三边）；合束器用 ``chain``。
+    """
     old = [o for k, o in objs.items() if k.startswith("panel_")]
     new = []
     for side in (+1.0, -1.0):
-        new += W.build_wing(side, face_x, state="deployed")
+        new += W.build_wing(side, face_x, state="deployed", topology=topology)
     for o in old:
         objs.pop(o.name.split(".")[0], None)
         bpy.data.objects.remove(o, do_unlink=True)
@@ -831,8 +847,8 @@ def build_spacecraft():
              ("cmb", build_cmb_parts(), (0.0, 0.0, 0.0), 0.0))
     out = {}
     for tag, objs, loc, rot in specs:
-        if tag != "cmb":                       # 集光器：单体翼板换成 SADA 机构（同制）
-            swap_wings(objs, (C.BUS_W + C.BUS_SHORT_W) / 4)
+        if tag != "cmb":                       # 集光器：单体翼板换成**十字**翼机构
+            swap_wings(objs, (C.BUS_W + C.BUS_SHORT_W) / 4, topology="cross")
         parts = list(objs.values())
         before = _lbounds(parts)
         added = upgrade(objs, tag, has_tube=(tag != "cmb"))
@@ -1334,10 +1350,9 @@ def build():
                                "MAT_beam_link 基色 %s／发光 %s／强度 %g"
                                % (COL_STAR_BASE, COL_STAR_EMIT, STAR_STRENGTH,
                                   COL_LINK_BASE, COL_LINK_EMIT, LINK_STRENGTH))
-    layout["cmb_body"] = ("全高平台舱 %.2f×%.2f×%.2f（与组合体同一物体，§二.3 v1.8）"
-                          "＋载荷舱 Ø%.2f×%.2f" % (A.BAY_L, A.BAY_W, A.BAY_T,
-                                                  2 * M.MODULE_R + 2 * M.MODULE_RIM_OVER,
-                                                  M.MODULE_H))
+    layout["cmb_body"] = ("两段结构：舱板段 %.2f×%.2f×%.2f（与组合体同一物体）"
+                          "＋承力筒 Ø%.2f×%.2f＋锁紧释放机构×2"
+                          % (A.BAY_W, A.BAY_L, A.BAY_T, A.TUBE_D_LOAD, M.MODULE_H))
 
     craft = build_spacecraft()
     _rebuild_materials()                      # §四 参数表：场景内重建（三器文件不动）
