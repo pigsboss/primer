@@ -1,0 +1,222 @@
+{
+ "tool": "primer-imgrefgen",
+ "view": "az0_el0_roll0",
+ "camera": {
+  "view": "az0_el0_roll0",
+  "az_deg": 0.0,
+  "el_deg": 0.0,
+  "roll_deg": 0.0,
+  "az_convention": "horizon direction (sin(az), -cos(az), 0); az=0 is a front view looking along +Y with +X to the right and +Z up",
+  "ortho": true,
+  "focal_mm": null,
+  "sensor_mm": 36.0,
+  "sensor_fit": "HORIZONTAL",
+  "ortho_scale": 13.968001365661621,
+  "distance": 44.136004,
+  "target_center": [
+   0.0,
+   0.0,
+   -0.35
+  ],
+  "res": [
+   320,
+   240
+  ],
+  "render_seconds": {
+   "id": 0.07
+  }
+ },
+ "model": {
+  "source": "assemble",
+  "path": "/Users/huo/Projects/primer/tests/fixtures/imgcmp/assemblies/mini_split.yaml",
+  "sha256_16": "7eb0d46207a3c955",
+  "normalized_dim_m": [
+   2.4,
+   8.0,
+   9.7
+  ],
+  "mesh_count": 3,
+  "vertex_count": 336,
+  "polygon_count": 212,
+  "parts": [
+   {
+    "name": "hull",
+    "path": "/Users/huo/Projects/primer/tests/fixtures/imgcmp/parts/box.glb",
+    "sha256_16": "209221d232e8d154",
+    "offset_m": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "rot_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "scale": [
+     1.0,
+     1.0,
+     1.0
+    ]
+   },
+   {
+    "name": "wing",
+    "path": "/Users/huo/Projects/primer/tests/fixtures/imgcmp/parts/bar.glb",
+    "sha256_16": "86e41df9ff96fa27",
+    "offset_m": [
+     0.0,
+     0.0,
+     4.0
+    ],
+    "rot_deg": [
+     0.0,
+     0.0,
+     90.0
+    ],
+    "scale": [
+     1.0,
+     1.0,
+     1.0
+    ]
+   },
+   {
+    "name": "dish",
+    "path": "/Users/huo/Projects/primer/tests/fixtures/imgcmp/parts/disc.glb",
+    "sha256_16": "897afe4a5ee433fa",
+    "offset_m": [
+     0.0,
+     0.0,
+     8.0
+    ],
+    "rot_deg": [
+     90.0,
+     0.0,
+     0.0
+    ],
+    "scale": [
+     1.0,
+     1.0,
+     1.0
+    ]
+   }
+  ],
+  "component_names": [
+   "hull",
+   "wing",
+   "dish"
+  ]
+ },
+ "truth_schema": {
+  "geometry_source": "id_image (connected components + bounding boxes only)",
+  "semantic_source": "declared yaml (shape_class, anchor)",
+  "background_rgb": [
+   0,
+   0,
+   0
+  ],
+  "color_match_tol_manhattan": 12.0,
+  "contact_tol_px": 2.0,
+  "contact_max_per_component": 64,
+  "height_axis": "y (image rows, top-down)",
+  "total_height_definition": "span from the topmost to the bottommost object pixel over all components"
+ },
+ "total_payload_height_px": 222,
+ "object_pixel_count": 3470,
+ "component_count": 3,
+ "component_count_all": 3,
+ "anchor": null,
+ "components": [
+  {
+   "index": 2,
+   "name": "dish",
+   "id_rgb": [
+    24,
+    8,
+    8
+   ],
+   "visible": true,
+   "pixel_count": 2372,
+   "area_fraction": 0.683573,
+   "bbox_xyxy": [
+    133,
+    1,
+    187,
+    56
+   ],
+   "centroid": [
+    159.5,
+    27.858
+   ],
+   "shape_class": "circle",
+   "height_fraction": 0.247748,
+   "anchor_ratio": null,
+   "islands": 1,
+   "contacts": [],
+   "source": "semantic",
+   "contacts_truncated": false
+  },
+  {
+   "index": 0,
+   "name": "hull",
+   "id_rgb": [
+    8,
+    8,
+    8
+   ],
+   "visible": true,
+   "pixel_count": 1058,
+   "area_fraction": 0.304899,
+   "bbox_xyxy": [
+    137,
+    200,
+    183,
+    223
+   ],
+   "centroid": [
+    159.5,
+    211.0
+   ],
+   "shape_class": "rect",
+   "height_fraction": 0.103604,
+   "anchor_ratio": null,
+   "islands": 1,
+   "contacts": [],
+   "source": "semantic",
+   "contacts_truncated": false
+  },
+  {
+   "index": 1,
+   "name": "wing",
+   "id_rgb": [
+    16,
+    8,
+    8
+   ],
+   "visible": true,
+   "pixel_count": 40,
+   "area_fraction": 0.011527,
+   "bbox_xyxy": [
+    158,
+    115,
+    162,
+    125
+   ],
+   "centroid": [
+    159.5,
+    119.5
+   ],
+   "shape_class": "rod",
+   "height_fraction": 0.045045,
+   "anchor_ratio": null,
+   "islands": 1,
+   "contacts": [],
+   "source": "semantic",
+   "contacts_truncated": false
+  }
+ ],
+ "id_match": {
+  "unique_colors": 4,
+  "exact_matched_colors": 3,
+  "unmatched_pixels": 0
+ }
+}

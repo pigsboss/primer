@@ -1,0 +1,9 @@
+# 手工声明的语义真值：satellite_kit 的太阳翼（wings_2.glb，4 个 mesh）
+tool: primer-imgrefgen
+match: "*/satellite_kit/wings_2.glb"
+default_shape_class: other
+# 匹配按文件顺序，先命中者胜——窄模式必须写在宽模式之前，否则
+# SatWing* 会先把 SatWingConnector5 吃掉。
+parts:
+  SatWingConnector*: rod  # 连接臂
+  SatWing*: rect          # 帆板

@@ -1,0 +1,54 @@
+# 受控缺陷对 —— C「圆形主镜」（基准侧），5 件。
+#
+# 与 mirror_hex.yaml **逐行同构**：部件、摆放、机位/取景/光照/尺度完全一致，
+# **只有 `mirror` 一行不同**（本文件用 disc.glb 圆板 → shape_class 真值 circle）。
+# 布局关于原点对称，镜件不决定整器包络，故相机正交尺度与两份 spec 的其余件逐值一致。
+#
+# 真值：镜形由 truth.parts.mirror 声明（本侧 circle／hex 侧 other）；语义量来自人写的
+# YAML，refgen 不做自动形状分类。
+tool: primer-imgrefgen
+name: mirror_round
+models_root: ../parts
+parts:
+  # 主镜：圆板 Ø2.4（与六边形板同宽、同高心，仅镜形不同）
+  - name: mirror
+    part: disc.glb
+    rot_deg: [90, 0, 0]
+    offset_m: [0, 0, 0]
+  # 遮阳屏盘 ×2：与 mirror_hex.yaml 逐值相同
+  - name: shade_left
+    part: disc.glb
+    rot_deg: [90, 0, 0]
+    offset_m: [-3.4, 0, 0]
+  - name: shade_right
+    part: disc.glb
+    rot_deg: [90, 0, 0]
+    offset_m: [3.4, 0, 0]
+  # 桁架杆 ×2：与 mirror_hex.yaml 逐值相同
+  - name: strut_top
+    part: bar.glb
+    scale: [0.55, 1, 1]
+    offset_m: [0, 0, 2.6]
+  - name: strut_bottom
+    part: bar.glb
+    scale: [0.55, 1, 1]
+    offset_m: [0, 0, -2.6]
+truth:
+  default_shape_class: other
+  parts:
+    mirror: circle
+    shade_left: circle
+    shade_right: circle
+    strut_top: rod
+    strut_bottom: rod
+expect:
+  pose: az0_el0_roll0
+  component_count: 5
+  height_fraction:
+    mirror: 0.4286
+    shade_left: 0.4286
+    strut_top: 0.0714
+  area_fraction:
+    mirror: 0.2647
+    shade_left: 0.2647
+    strut_top: 0.1030

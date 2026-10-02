@@ -1,0 +1,9 @@
+# 坏 spec：parts 里第二项指向不存在的部件文件——refgen 必须报错退出 2，不得静默跳过。
+tool: primer-imgrefgen
+name: mini_broken
+models_root: ../parts
+parts:
+  - name: hull
+    part: box.glb
+  - name: ghost
+    part: no_such_part.glb

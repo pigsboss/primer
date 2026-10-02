@@ -1,0 +1,54 @@
+{
+ "tool": "primer-imgrefgen",
+ "view": "az0_el0_roll0",
+ "res": [
+  320,
+  240
+ ],
+ "background_rgb": [
+  0,
+  0,
+  0
+ ],
+ "legend": [
+  {
+   "index": 0,
+   "rgb": [
+    8,
+    8,
+    8
+   ],
+   "name": "hull",
+   "objects": [
+    "Box"
+   ],
+   "source": "semantic"
+  },
+  {
+   "index": 1,
+   "rgb": [
+    16,
+    8,
+    8
+   ],
+   "name": "wing",
+   "objects": [
+    "Bar"
+   ],
+   "source": "semantic"
+  },
+  {
+   "index": 2,
+   "rgb": [
+    24,
+    8,
+    8
+   ],
+   "name": "dish",
+   "objects": [
+    "Disc"
+   ],
+   "source": "semantic"
+  }
+ ]
+}

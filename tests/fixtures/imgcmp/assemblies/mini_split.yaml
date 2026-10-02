@@ -1,0 +1,25 @@
+# 自足的小拼装样本（部件在 ../parts/，各 1.7–11 KB），供 pytest 在无 Blender 的
+# 机器上也能解析 spec、也可在装了 Blender 时真渲染一遍。
+tool: primer-imgrefgen
+name: mini_split
+models_root: ../parts
+parts:
+  - name: hull
+    part: box.glb
+    offset_m: [0, 0, 0]
+  - name: wing
+    part: bar.glb
+    rot_deg: [0, 0, 90]
+    offset_m: [0, 0, 4]
+  - name: dish
+    part: disc.glb
+    rot_deg: [90, 0, 0]
+    offset_m: [0, 0, 8]
+truth:
+  default_shape_class: other
+  parts:
+    hull: rect
+    wing: rod
+    dish: circle
+expect:
+  component_count: 3

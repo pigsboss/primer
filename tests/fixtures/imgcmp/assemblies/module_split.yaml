@@ -1,0 +1,45 @@
+# 受控缺陷对 —— A「拆分模块」（基准侧），4 件。
+#
+# 设计意图（供 A-T2a-1 检"组件数 + 高度分数"级差异）：
+#   星体陷在两翼之间、通信天线在其上方撑高整器，
+#   于是 body 只占整器高度约 0.26、radio 占约 0.61，组件数 4。
+# 对照 module_long.yaml：同样的件换一种放法 → 组件数 3、body 高度分数 1.00。
+#
+# 摆放口径（refgen 约定）：每件先按自身包围盒中心对中，再 scale → rot_deg（XYZ 欧拉）
+# → offset_m。front 机位（--angles 0,0,0 --ortho）下屏幕右＝+X、屏幕上＝+Z，
+# 故高度的差异可解析预测，见 expect。
+tool: primer-imgrefgen
+name: module_split
+models_root: /Users/huo/Documents/kimi/Workspaces/行星探测工程/_primer/scene/assets/models
+parts:
+  - name: body
+    part: components/power_structure/satellite_kit/body_2.glb
+    rot_deg: [0, 0, 90]
+    offset_m: [0, 0, 0]
+  - name: wing_left
+    part: components/power_structure/satellite_kit/wings_2.glb
+    rot_deg: [90, 0, 0]
+    offset_m: [-0.14, 0, 0]
+  - name: wing_right
+    part: components/power_structure/satellite_kit/wings_2.glb
+    rot_deg: [90, 0, 180]
+    offset_m: [0.14, 0, 0]
+  - name: radio
+    part: components/power_structure/satellite_kit/radio_2.glb
+    scale: [1, 1, 1.5]
+    offset_m: [0, 0, 0.055]
+truth:
+  default_shape_class: other
+  anchor:
+    name: body
+    size_m: 0.059
+  parts:
+    body: rect
+    wing_left: rect
+    wing_right: rect
+    radio: circle
+expect:
+  component_count: 4
+  height_fraction:
+    body: 0.263
+    radio: 0.608

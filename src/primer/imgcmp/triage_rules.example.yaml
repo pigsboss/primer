@@ -1,0 +1,73 @@
+# primer-imgtriage 规则示例（2034 观象台"觅音 1+4"任务）
+#
+# 规则文件由**调用方（总体）提供**：工具内零任务数值，档位判定完全由本文件决定。
+# 本示例演示 2034 的《允许差清单》两条与三项"首轮错误"构型级声明（判据号取
+# 《反馈与修改指令_2034_v2》D1–D3 与《验收清单_2034》M2/M3/M21/M22）。
+# 语言：键英文；注记/值中文（docs/guides/CODING_STANDARDS.md v1.1）。
+version: 1
+
+# ---- 允许差：命中《允许差清单》条目 → 维持设计，登记分诊表，挂清单条目号 ----
+allow:
+  - list_item_id: 2034-AL-01
+    note: 基准无背景／我方星空（基准为论文白底 CAD 图，我方为黑底星空渲染）
+    disposition: 维持设计，登记分诊表（挂清单条目号）
+    kind: background_kind
+
+  - list_item_id: 2034-AL-02
+    note: 基准拆面展示／我方外立面闭合（基准把下段剖开呈现内部，剖口使该件读成不规则
+      轮廓 other；我方外立面闭合读成环带 ring）。仅限**同一个已配对件**上由剖口引起的
+      几何类差异，不覆盖我方独有件
+    disposition: 维持设计，登记分诊表（挂清单条目号）
+    kind: [hole_count, shape_class, area_fraction, height_fraction, contact]
+    ref_shape: other
+    ours_shape: ring
+
+# ---- 执行自由度内差异：仅命中声明的自由度范围（观感/工艺/未冻结细节）----
+# 本任务不设自由度条目；留空表示"无任何差异可自行迭代维持"（保守）。
+free: []
+
+# ---- 构型级：触及构型/几何判据的差异，显式声明 → 一律升级（优先级最高）----
+escalate:
+  # CFG-01 外置桅杆／外置长杆（转发模块外置，触及包络判据 M21）
+  - judgement: CFG-01
+    note: 外置桅杆：我方独有一根长杆件（细长类 rod、像素量最大者）自桁架顶伸展，
+      基准图无此件——首轮把 Fig.3(b) 细长杆按外置水平桅杆建模
+    advice: 按 D2 删除外置桅杆与光阑板，改为内置遮光筒（筒轴∥主光轴，XY 投影最大
+      半径 ≤ 罩半径 − 0.3 m），重跑 M21 并附反静默证明
+    kind: added
+    ours_shape: rod
+    ours_min: 10000
+
+  - judgement: CFG-01
+    note: 外置长杆取代短件（受控缺陷对 module_split→module_long：组件数下降、载荷
+      高度分数由 ≈0.30 升到 1.00、并件/拆件——"长杆取代短件"的同类差异）
+    advice: 同上（D2）；受控对用于证明该差异类可被 T2a 检出、且本规则判为升级
+    when:
+      ref_path_contains: module_split
+    kind: height_fraction
+    abs_delta_min: 0.5
+
+  # CFG-02 开架方舱（下段推进服务舱开架方盒 vs 封闭六棱台，触及 M22）
+  - judgement: CFG-02
+    note: 开架方舱：我方下段为我方独有的多边形舱体件（形状类 other，非规则矩形/圆/
+      环带），基准中该区与其余部分并成一件——首轮把 CAD 拆面画法误读成开架构型
+    advice: 按 D3 重做为封闭六棱台（六侧棱、上下底封闭、内件不外显、金色 MLI 覆外表），
+      重跑 M22（边界边 0／非流形边 0／舱内件 0）
+    kind: added
+    ours_shape: other
+    ours_min: 10000
+
+  # CFG-03 六边形主镜（主镜六边形 vs 圆形，触及 M2/M3）
+  - judgement: CFG-03
+    note: 六边形主镜：基准为圆形/规则体（circle/rect），我方读成多边形 other
+    advice: 按 D1 重做为圆形 Ø3.5 碳化硅镀金主镜，复核 M2（直径 3.5）与 M3（圆形可辨）
+    kind: shape_class
+    ref_shape: [circle, rect]
+    ours_shape: other
+
+# ---- 清单外默认档位与异议单模板字段 ----
+escalation:
+  default: escalate
+  template:
+    title: 异议单
+    fields: [差异描述, 特征证据, 建议方案]

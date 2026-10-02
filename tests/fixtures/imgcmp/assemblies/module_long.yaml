@@ -1,0 +1,38 @@
+# 受控缺陷对 —— B「单长件」（缺陷侧），3 件。
+#
+# 与 module_split.yaml 同一批素材：星体被拉高成整器的主角（高度分数 1.00），
+# 少一片翼、多一根细长杆 → 组件数 4 → 3。
+# 期望差异由本文件的 expect 声明，refgen 打印"期望 vs 实测"对照表。
+tool: primer-imgrefgen
+name: module_long
+models_root: /Users/huo/Documents/kimi/Workspaces/行星探测工程/_primer/scene/assets/models
+parts:
+  - name: body
+    part: components/power_structure/satellite_kit/body_2.glb
+    rot_deg: [0, 0, 90]
+    scale: [1, 1, 3]
+    offset_m: [0, 0, 0]
+  - name: wing_left
+    part: components/power_structure/satellite_kit/wings_2.glb
+    rot_deg: [90, 0, 0]
+    offset_m: [-0.14, 0, 0]
+  - name: rod
+    part: components/optical/jwst_mirror/parts/base rod.stl
+    scale: [0.011, 0.011, 0.011]
+    rot_deg: [0, 90, 0]
+    offset_m: [0.06, 0, 0.02]
+truth:
+  default_shape_class: other
+  anchor:
+    name: body
+    size_m: 0.059
+  parts:
+    body: rect
+    wing_left: rect
+    rod: rod
+expect:
+  component_count: 3
+  height_fraction:
+    body: 1.0
+    wing_left: 0.377
+    rod: 0.199

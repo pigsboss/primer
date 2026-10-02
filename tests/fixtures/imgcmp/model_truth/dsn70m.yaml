@@ -1,0 +1,27 @@
+# 手工声明的语义真值：DSN 70 m 天线（components/antennas/dsn70m.glb，15 个 mesh）
+#
+# refgen 只从这里取"语义量"：shape_class 与锚件。它**不会**用形状描述子自动分类——
+# 分类由人按下表声明，几何量（bbox/面积/高度分数/接触）另行从 id.png 算得。
+# parts 的键是部件名的 glob（fnmatch，区分大小写）；未命中的部件按 default_shape_class 填。
+tool: primer-imgrefgen
+match: "*/antennas/dsn70m.glb"
+default_shape_class: other
+anchor:
+  name: dish          # 主反射面，作为尺寸基准
+  size_m: 70.0        # 声明值（相当于 T2a 的"屏盘＝Ø10.5"锚件定义）
+parts:
+  dish: circle        # 主反射面
+  dish.001: circle    # 副反射面
+  dish.002: ring      # 环形内盘
+  truss_dish: circle  # 反射面背架（俯视呈圆）
+  azimuth: rect       # 方位机构箱体
+  base: rect          # 基座
+  landing: rect       # 着陆平台
+  truss_box: rect     # 方舱桁架
+  collector: rod      # 馈源筒（竖向细长）
+  quad: rod           # 四足支撑
+  rails: rod          # 走线轨
+  stairs: rod         # 舷梯
+  truss_pendulum: rod # 摆杆
+  elevation: other    # 小尺寸俯仰件
+  _root: other        # 根节点占位

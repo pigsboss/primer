@@ -1,0 +1,8 @@
+# 手工声明的语义真值：小行星（bodies/*.stl，STL 无部件层次，导入即单个 mesh）
+#
+# 形状不规则、无部件可拆，形类一律 other——这正是"不做形状描述子自动分类"的用例：
+# 若交给自动分类器，它会按轮廓硬塞进 rect/circle 之一，语义就假了。
+tool: primer-imgrefgen
+match: "*/bodies/*.stl"
+default_shape_class: other
+parts: {}

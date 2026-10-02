@@ -9,6 +9,8 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "PyYAML>=6.0",
+    "numpy>=1.24",
+    "Pillow>=10.0",
 ]
 dynamic = ["version"]
 
@@ -25,6 +27,11 @@ primer-references = "primer.references.__main__:main"
 primer-claims = "primer.claims.__main__:main"
 primer-slides = "primer.slides.__main__:main"
 primer-scene = "primer.scene.__main__:main"
+primer-imgrefgen = "primer.imgcmp.refgen:main"
+primer-imgtile = "primer.imgcmp.tiler:main"
+primer-imgfeat = "primer.imgcmp.feat:main"
+primer-imgpose = "primer.imgcmp.pose:main"
+primer-imgtriage = "primer.imgcmp.triage:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "primer.__version__" }

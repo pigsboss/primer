@@ -1,0 +1,13 @@
+# 手工声明的语义真值：James Webb 空间望远镜（spacecraft/jwst.glb，1600 个 mesh）
+#
+# 1600 件不可能逐件点名，这里只给"值得点名"的少数模式：支撑杆＝rod，其余按
+# default_shape_class 填 other。被点名的部件 source=semantic，其余 source=derived。
+tool: primer-imgrefgen
+match: "*/spacecraft/jwst.glb"
+default_shape_class: other
+parts:
+  "*rod*": rod
+  "*Rod*": rod
+  "*bar*": rod
+  "*truss*": other
+  "*mirror*": circle

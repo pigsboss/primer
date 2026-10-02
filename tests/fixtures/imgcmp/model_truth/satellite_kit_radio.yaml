@@ -1,0 +1,11 @@
+# 手工声明的语义真值：satellite_kit 的通信天线（radio_2.glb，3 个 mesh）
+tool: primer-imgrefgen
+match: "*/satellite_kit/radio_2.glb"
+default_shape_class: other
+anchor:
+  name: SatRadioDish1
+  size_m: 0.062
+parts:
+  SatRadioDish1: circle
+  SatRadioDish2: circle
+  pCube1: rect

@@ -1,0 +1,9 @@
+# 手工声明的语义真值：satellite_kit 的星体（body_2.glb，1 个 mesh）
+tool: primer-imgrefgen
+match: "*/satellite_kit/body_2.glb"
+default_shape_class: other
+anchor:
+  name: SatBody4
+  size_m: 0.059
+parts:
+  SatBody4: rect

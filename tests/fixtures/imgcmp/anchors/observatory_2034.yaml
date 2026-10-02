@@ -1,0 +1,22 @@
+# 示例锚件配置 —— 2034 干涉仪载荷（imgcmp T2a `primer-imgfeat --anchors`）。
+#
+# 「示例，真值由总体提供」：这里的 Ø10.5／Ø3.5／9.5×1.6 只是把需求书 §二 T2a 里举的
+# 例子落成一份可跑的 YAML，**不是**冻结参数；正式跑批请换总体随任务书签发的那一份。
+#
+# 键一律英文；selector.rule 取值：
+#   largest        —— 取像素面积最大的组件
+#   bbox_longest   —— 取外接框跨度最大的组件（可给 axis: x|y，缺省取 max(w,h)）
+#   position       —— 取落在指定边缘带内的组件（side: top|bottom|left|right，
+#                     within_frac 为带宽占载荷外接框的比例，缺省 0.35）
+tool: primer-imgfeat
+note: "示例，真值由总体提供"
+anchors:
+  - name: shield            # 屏盘 Ø10.5 m
+    ref_m: 10.5
+    selector: {rule: largest}
+  - name: primary_mirror    # 主镜 Ø3.5 m
+    ref_m: 3.5
+    selector: {rule: bbox_longest}
+  - name: tube              # 筒 9.5 x 1.6 m
+    ref_m: 9.5
+    selector: {rule: position, side: top, within_frac: 0.4}

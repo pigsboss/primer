@@ -1,0 +1,67 @@
+# 受控缺陷对 —— C2「**正**六边形主镜」（缺陷侧），5 件。与 mirror_hex.yaml 只差一行：
+# 本件用 hex_plate_regular.glb（对边比 1.00 的正六边形），那一版用 1.35 的拉长六边形。
+#
+# 设计意图（供 A-H1-1 第三项"六边形主镜"回放）：
+#   与 mirror_round.yaml **逐行同构**——同一批部件、同一摆放、同一机位/取景/光照/尺度，
+#   只有 `mirror` 一行不同（本文件用 hex_plate_regular.glb：对边比 1.00 的正六边形板；
+#   那一侧用 disc.glb 圆板）。布局关于原点对称（镜件居中、两片屏盘分居左右、
+#   两根横杆上下），故整器包围盒与相机正交尺度在两份 spec 间逐值一致。
+#
+# 为什么是正六边形：第 5 轮给 T2a 补了 polygon 判据（凸包抽稀直边数 + 残差 + 凸包充实度），
+#   正六边形必须判 polygon/hexagon，而圆板仍判 circle——本 spec 就是这条判据的验收样本。
+#   早先用 1.35 拉长六边形（mirror_hex.yaml）只是为了在旧判据下让涨宽比越过 1.25，
+#   现作为附加用例保留。
+#
+# 真值口径：refgen 的手工声明 `truth.parts` 词汇表是 rect/circle/ring/rod/other
+#   （`refgen.py:SHAPE_CLASSES`），**不含 polygon**——polygon 是 T2a/imgfeat 侧新加的
+#   形状类（见 feat.py 判据与 docs/guides/imgcmp.md 的 T2a 权威节）。故本 spec 的
+#   声明仍写 `mirror: other`（"非圆非杆非环"），`polygon/hexagon` 由 imgfeat 判出。
+#
+# 摆放口径（refgen 约定）：每件先按自身包围盒中心对中，再 scale → rot_deg（XYZ 欧拉）
+# → offset_m；front 机位（--angles 0,0,0 --ortho）下屏幕右＝+X、屏幕上＝+Z。
+tool: primer-imgrefgen
+name: mirror_hex_regular
+models_root: ../parts
+parts:
+  # 主镜：六边形板（对边比 1.00 正六边形，板面 XY 平面）
+  - name: mirror
+    part: hex_plate_regular.glb
+    rot_deg: [90, 0, 0]
+    offset_m: [0, 0, 0]
+  # 遮阳屏盘 ×2：Ø2.4 圆盘分居主镜左右（各留 2.2 与 2.2 的间隙）
+  - name: shade_left
+    part: disc.glb
+    rot_deg: [90, 0, 0]
+    offset_m: [-3.4, 0, 0]
+  - name: shade_right
+    part: disc.glb
+    rot_deg: [90, 0, 0]
+    offset_m: [3.4, 0, 0]
+  # 桁架杆 ×2：上下各一根横杆（4.4 长 × 0.2 厚），围出比主镜更大的包络
+  - name: strut_top
+    part: bar.glb
+    scale: [0.55, 1, 1]
+    offset_m: [0, 0, 2.6]
+  - name: strut_bottom
+    part: bar.glb
+    scale: [0.55, 1, 1]
+    offset_m: [0, 0, -2.6]
+truth:
+  default_shape_class: other
+  parts:
+    mirror: other
+    shade_left: circle
+    shade_right: circle
+    strut_top: rod
+    strut_bottom: rod
+expect:
+  pose: az0_el0_roll0
+  component_count: 5
+  height_fraction:
+    mirror: 0.373
+    shade_left: 0.429
+    strut_top: 0.071
+  area_fraction:
+    mirror: 0.230
+    shade_left: 0.277
+    strut_top: 0.108
