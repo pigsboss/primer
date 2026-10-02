@@ -100,6 +100,55 @@ def face_half_width(bus, y):
     return w_lo + (w_hi - w_lo) * t
 
 
+def slant_face(bus, side):
+    """该器 ±X **斜面**的网格真值：取面积最大的朝该侧大面片，返回 (n_world, p_world)。
+
+    大平面有 ≤5 mm 低频微起伏（formation 的去周期化），小倒角面片法向会被搅乱，故按面积取。
+    ``side`` 按**该器自身坐标系**判定（assembly 里 colA 绕 Z 转 180°，世界 x 会翻号）。
+    """
+    best = None
+    for poly in bus.data.polygons:
+        n = poly.normal                                  # 对象空间即该器自身系
+        if side * n.x > 0.9 and abs(n.z) < 0.15:
+            if best is None or poly.area > best[0]:
+                best = (poly.area, n.copy(), poly.center.copy())
+    if best is None:
+        return None, None
+    mw = bus.matrix_world
+    return (mw.to_3x3() @ best[1]).normalized(), mw @ best[2]
+
+
+def bus_local_y_span(bus):
+    """舱体自身系的 y 跨度与"世界→自身系"逆矩阵（判顶点是否落在舱体 y 跨度内用）。"""
+    ys = [v.co.y for v in bus.data.vertices]
+    return min(ys), max(ys), bus.matrix_world.inverted()
+
+
+def pen_stats(bus, objs):
+    """**没入/离缝真值**：逐顶点用 Object.closest_point_on_mesh（不包围盒近似）。
+
+    返回 (最大没入, 最深处顶点, 最小离缝, 离缝处顶点, 查询失败数)；没入＝顶点在舱体内时到
+    最近表面的距离，离缝＝顶点在舱体外时的最小距离。**查询失败数 >0 ⇒ 判据 FAIL**（读取失败
+    不得静默通过）。
+    """
+    inv = bus.matrix_world.inverted()
+    worst, wpt, gap, gpt, miss = 0.0, None, None, None, 0
+    for o in objs:
+        for p in wverts(o):
+            lp = inv @ p
+            ok, loc, nrm, _ = bus.closest_point_on_mesh(lp)
+            if not ok:
+                miss += 1
+                continue
+            d = (lp - loc).length
+            if (lp - loc).dot(nrm) < 0.0:
+                if d > worst:
+                    worst, wpt = d, tuple(round(c, 4) for c in p)
+            elif gap is None or d < gap:
+                gap, gpt = d, tuple(round(c, 4) for c in p)
+    return worst, wpt, gap, gpt, miss
+
+
 def png_size(path):
     with open(path, "rb") as f:
         head = f.read(24)
@@ -216,13 +265,20 @@ def main():
             bad.append((o.name, c))
     check("D6", "金色包覆：除豁免件外一切可见结构件金色 MLI", not bad, f"非金色结构件={bad or '无'}")
 
-    # ---- D7 集光器翼折叠（v1.1：4 板 Z 折成摞贴 ±X 舱板，整摞外廓距舱面 ≤0.16 m）----
+    # ---- D7 集光器翼折叠（几何 v3 双侧限：翼摞**斜面**贴合）----
+    # **外廓上限**＝整摞顶点相对 ±X **斜面**的垂距 ≤0.16 m。斜面装翼下"距舱面"只能按**垂距**
+    #   读：原轴对齐读数（|x|max − 该 y 处半宽）在斜面角 0 时与垂距等价，斜置后恒偏大
+    #   （把倾斜摞的"上坡角"当成离面量），故仅作对照打印、不作判据。
+    # **没入下限**＝板（panel_*）顶点没入舱体 ＝0；用 Object.closest_point_on_mesh 真值量
+    #   （不包围盒近似），>2 mm 即 FAIL（《验收反馈 09》§三.5 量法）。
     detail, ok = [], True
     bus_w = max(vdims([buses["colA"]])[0], vdims([buses["colA"]])[1])
     for t in ("colA", "colB"):
         bus = buses[t]
         blo, bhi = vbounds([bus])
-        for sx in ("X", "-X"):
+        y_lo, y_hi, inv_bus = bus_local_y_span(bus)
+        for side in (+1.0, -1.0):
+            sx = "X" if side > 0 else "-X"
             ps = [find("%s_panel_%s%d" % (t, sx, i)) for i in range(1, 5)]
             ps = [p for p in ps if p]
             if len(ps) != 4:
@@ -230,16 +286,43 @@ def main():
                 detail.append(f"{t}{sx}:板数={len(ps)}")
                 continue
             plo, phi = vbounds(ps)
-            face = face_half_width(bus, (plo[1] + phi[1]) / 2)
-            env = max(abs(plo[0]), abs(phi[0])) - face          # 整摞外廓距舱面
-            thick = phi[0] - plo[0]                             # 摞厚（4×0.03＋折缝）
+            n, p0 = slant_face(bus, side)
+            if n is None:
+                ok = False
+                detail.append(f"{t}{sx}:找不到 ±X 斜面（网格异常）")
+                continue
+            ds = [(v - p0).dot(n) for o in ps for v in wverts(o)
+                  if y_lo - 1e-6 <= (inv_bus @ v).y <= y_hi + 1e-6]
+            env = max(ds)                                       # 外廓（相对斜面垂距）
+            env_axis = max(abs(plo[0]), abs(phi[0])) \
+                - face_half_width(bus, (plo[1] + phi[1]) / 2)   # 旧轴对齐读数（仅对照）
+            thick = max(ds) - min(ds)                           # 摞厚（沿斜面法向＝4×0.03＋折缝）
+            thick_axis = phi[0] - plo[0]                        # 旧轴对齐读数（斜置后含投影，仅对照）
             proj_ok = (phi[1] - plo[1]) <= 1.1 * (bhi[1] - blo[1]) and \
                       (phi[2] - plo[2]) <= 1.1 * (bhi[2] - blo[2])
-            good = 0.0 <= env <= 0.16 and thick <= 0.20 and proj_ok
+            pen, pen_at, gap, gap_at, miss = pen_stats(bus, ps)
+            en, en_pen, en_gap, en_miss = 0.0, 0.0, None, 0
+            es = [find("%s_EDGE_%s%d" % (t, sx, i)) for i in range(1, 5)]
+            es = [e for e in es if e]
+            if es:
+                es_ds = [(v - p0).dot(n) for o in es for v in wverts(o)
+                         if y_lo - 1e-6 <= (inv_bus @ v).y <= y_hi + 1e-6]
+                en = max(es_ds) if es_ds else 0.0
+                en_pen, _, en_gap, _, en_miss = pen_stats(bus, es)
+            good = (0.0 <= env <= 0.16) and thick <= 0.20 and proj_ok \
+                and pen <= 0.002 and miss == 0
             ok = ok and good
-            detail.append(f"{t}{sx}:外廓{env:+.3f}(≤0.16)/摞厚{thick:.3f}/"
-                          f"投影{'ok' if proj_ok else 'BAD'}")
-    check("D7", "集光器翼折叠：4 板 Z 折成摞贴 ±X 舱板（整摞外廓距舱面 ≤0.16 m），投影不超舱体 1.1 倍",
+            detail.append(
+                f"{t}{sx}:外廓{env:.3f}(上限 0.16)/没入{pen:.6f}@{(pen_at[0], pen_at[1], pen_at[2]) if pen_at else '—'}"
+                f"(下限 0，>0.002 即 FAIL)/离缝{gap if gap is None else round(gap, 4)}"
+                f"{'@' + str(gap_at) if gap_at else ''}/查询失败{miss}/"
+                f"摞厚{thick:.3f}(沿斜面对照轴对齐{thick_axis:.3f})/"
+                f"投影{'ok' if proj_ok else 'BAD'}/旧轴对齐读数{env_axis:+.3f}(对照)"
+                f"／翼缘描边(补充)外廓{en:.3f}·没入{en_pen:.6f}·离缝"
+                f"{en_gap if en_gap is None else round(en_gap, 4)}·查询失败{en_miss}")
+    check("D7", "集光器翼折叠（**外廓上限＋没入下限**双侧限）：4 板 Z 折成摞贴 ±X 斜面"
+                "（整摞顶点相对斜面垂距 ≤0.16 m）；板-舱**没入＝0**（＞2 mm 即 FAIL，"
+                "closest_point_on_mesh 真值）；摞厚 ≤0.20；投影不超舱体 1.1 倍",
           ok, "；".join(detail))
 
     # ---- D8 合束器翼展开（v1.1：每翼 4 板成线自 SADA 外伸、法向朝 −Z ≤30°、跨度 ≥3×舱宽）----

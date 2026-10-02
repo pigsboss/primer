@@ -119,6 +119,55 @@ def bvh(objs):
     return BVHTree.FromPolygons(vs, ps)
 
 
+def slant_face(bus, side):
+    """该器 ±X **斜面**的网格真值：取面积最大的朝该侧大面片，返回 (n_world, p_world)。
+
+    舱体大平面有 ≤5 mm 低频微起伏（本阶段去周期化），小倒角面片法向会被搅乱，故按面积取。
+    ``side`` 按**该器自身坐标系**判定（colB 绕 Z 转 180°，世界 x 会翻号）。
+    """
+    best = None
+    for poly in bus.data.polygons:
+        n = poly.normal                                  # 对象空间即该器自身系
+        if side * n.x > 0.9 and abs(n.z) < 0.15:
+            if best is None or poly.area > best[0]:
+                best = (poly.area, n.copy(), poly.center.copy())
+    if best is None:
+        return None, None
+    mw = bus.matrix_world
+    return (mw.to_3x3() @ best[1]).normalized(), mw @ best[2]
+
+
+def bus_local_y_span(bus):
+    """舱体自身系的 y 跨度与"世界→自身系"逆矩阵（判顶点是否落在舱体 y 跨度内用）。"""
+    ys = [v.co.y for v in bus.data.vertices]
+    return min(ys), max(ys), bus.matrix_world.inverted()
+
+
+def pen_stats(bus, objs):
+    """**没入/离缝真值**：逐顶点用 Object.closest_point_on_mesh（不包围盒近似）。
+
+    返回 (最大没入, 最深处顶点, 最小离缝, 离缝处顶点, 查询失败数)；没入＝顶点在舱体内时到
+    最近表面的距离，离缝＝顶点在舱体外时的最小距离。**查询失败数 >0 ⇒ 判据 FAIL**（读取失败
+    不得静默通过）。
+    """
+    inv = bus.matrix_world.inverted()
+    worst, wpt, gap, gpt, miss = 0.0, None, None, None, 0
+    for o in objs:
+        for p in wv(o):
+            lp = inv @ p
+            ok, loc, nrm, _ = bus.closest_point_on_mesh(lp)
+            if not ok:
+                miss += 1
+                continue
+            d = (lp - loc).length
+            if (lp - loc).dot(nrm) < 0.0:
+                if d > worst:
+                    worst, wpt = d, tuple(round(c, 4) for c in p)
+            elif gap is None or d < gap:
+                gap, gpt = d, tuple(round(c, 4) for c in p)
+    return worst, wpt, gap, gpt, miss
+
+
 def mat_color(o):
     if not o or not o.data or not o.data.materials:
         return None
@@ -834,6 +883,8 @@ def main():
     for t in ("colA", "colB"):
         rows = []
         for sx in ("X", "-X"):
+            bus = find("%s_bus" % t)
+            side = 1.0 if sx == "X" else -1.0
             ps = [find("%s_panel_%s%d" % (t, sx, i)) for i in range(1, WING_PANELS + 1)]
             ps = [p for p in ps if p]
             hs = [find("%s_HINGE_%s0%d" % (t, sx, i)) for i in range(1, 4)]
@@ -866,18 +917,35 @@ def main():
             hinge_ok = all(min(((ctr(h)[0] - ctr(p)[0]) ** 2
                                 + (ctr(h)[1] - ctr(p)[1]) ** 2) ** 0.5
                                for p in ps) <= SQ_PANEL * 0.75 for h in hs)   # 铰链落在板缝上
+            # ── 双侧限之**没入下限**（《验收反馈 09》§三.4/§三.5）：板顶点没入器体舱 ＝0，
+            #    真值法 Object.closest_point_on_mesh（不包围盒近似），>2 mm 即 FAIL ──
+            pen, pen_at, gap, gap_at, miss = pen_stats(bus, ps)
+            n_sl, p_sl = slant_face(bus, side)
+            y_lo, y_hi, inv_bus = bus_local_y_span(bus)
+            root_d = None
+            if n_sl is not None:
+                ds = [(v - p_sl).dot(n_sl) for v in wv(root)
+                      if y_lo - 1e-6 <= (inv_bus @ v).y <= y_hi + 1e-6]
+                root_d = min(ds) if ds else None      # 翼根（0 号板内缘）离斜面最小垂距
+            pen_ok = pen <= 0.002 and miss == 0      # 查询失败即 FAIL（禁止静默通过）
             good = (dims_ok and normal_ok and adj_ok and span_ok2 and hinge_ok
-                    and abs(area - CROSS_AREA) <= CROSS_AREA * 0.05)
+                    and abs(area - CROSS_AREA) <= CROSS_AREA * 0.05 and pen_ok)
             e23_ok = e23_ok and good
             # 串联拓扑（错）时臂心两两间距＝0.57；十字拓扑下对边两臂相距 1.14
             pair = max(((ctr(a)[0] - ctr(b)[0]) ** 2 + (ctr(a)[1] - ctr(b)[1]) ** 2) ** 0.5
                        for i, a in enumerate(arms) for b in arms[i + 1:])
             rows.append(f"{t}{sx}:4 方板 {[round(dims([p])[0], 2) for p in ps]}/面积 {area:.3f}/"
-                        f"臂心最大间距 {pair:.2f}/跨 {spans}/法向−Z={normal_ok}")
+                        f"臂心最大间距 {pair:.2f}/跨 {spans}/法向−Z={normal_ok}"
+                        f"/没入{pen:.6f}@{(pen_at[0], pen_at[1], pen_at[2]) if pen_at else '—'}"
+                        f"(>0.002 即 FAIL)/离缝{gap if gap is None else round(gap, 4)}"
+                        f"{'@' + str(gap_at) if gap_at else ''}/查询失败{miss}"
+                        f"/翼根离斜面垂距{'—' if root_d is None else format(root_d, '.4f')}(实测，区间待总体落版)")
         e23[t] = rows
-    e23_args = ("E23", "集光器翼十字拓扑：每翼 SADA×1＋方板×4（0.57×0.57×0.03）＋铰链×3；"
-                 "1/2/3 号板分别铰接 0 号板相邻三边（非串联）；展开轮廓十字（对边轴 1.71、"
-                 "第三边轴 1.14，±10%）；法向朝 −Z；4 板总面积 1.296±5%",
+    e23_args = ("E23", "集光器翼十字拓扑（**外廓上限＋没入下限**双侧限）：每翼 SADA×1＋方板×4"
+                 "（0.57×0.57×0.03）＋铰链×3；1/2/3 号板分别铰接 0 号板相邻三边（非串联）；"
+                 "展开轮廓十字（对边轴 1.71、第三边轴 1.14，±10%）＝外廓上限；法向朝 −Z；"
+                 "4 板总面积 1.296±5%；**板-舱没入＝0（＞2 mm 即 FAIL**，closest_point_on_mesh "
+                 "真值＝没入下限）；翼根离斜面垂距与离缝按实测记入 detail",
           e23_ok, "；".join(e23["colA"]))
 
     # ---- E24 合束器两段结构（反馈 06 N2）----
