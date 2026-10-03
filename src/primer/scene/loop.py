@@ -970,11 +970,17 @@ class Driver:
             reply = self._exchange(client, message)
         except (LlmError, ConfigError) as exc:
             self._diag(f"role '{role}' round failed: {exc}")
+            hint = ""
+            if "finish_reason=length" in str(exc):
+                hint = (
+                    "（直读：输出预算被推理链吃光——思考型模型的推理与正文共享 max_tokens。"
+                    "请在 _primer/config.yaml 提高该 role 的 max_tokens 后重发；本条消息已消费。）"
+                )
             self._write_reply(
                 {
                     "ts": _now(),
                     "role": "agent",
-                    "text": f"调用模型失败（role={role}）：{exc}",
+                    "text": f"调用模型失败（role={role}）：{exc}{hint}",
                     "model": role,
                     "provider": "",
                     "actions_executed": [],

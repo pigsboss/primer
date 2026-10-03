@@ -864,3 +864,20 @@ def test_answers_directory_is_in_the_round_context(tree):
     assert "人的作答" in text
     assert "维持5层，但需要降低层间距" in text
     assert "r2_review" in text
+
+
+def test_length_budget_exhaustion_gets_an_actionable_hint(tree):
+    """推理吃光预算（finish_reason=length、正文空）时，错误回帖必须给出可操作提示。"""
+    project, task, session = tree
+    transport = FakeTransport([
+        LlmReplyError(
+            "endpoint returned an empty message (finish_reason=length, "
+            'usage={"completion_tokens": 16384, "reasoning_tokens": 16384})'
+        )
+    ])
+    driver = make_driver(tree, transport)
+    send_user(session, "重建")
+    driver.run_once()
+    agent = agents(session)[-1]
+    assert "输出预算被推理链吃光" in agent["text"]
+    assert "max_tokens" in agent["text"]
