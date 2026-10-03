@@ -30,10 +30,12 @@
   </section>
   <aside id="panel">
     <div id="tabs">
+      <button data-tab="chat" class="tab">对话<span id="chat-unread" class="unread hidden">0</span></button>
       <button data-tab="cards" class="tab active">问题卡</button>
       <button data-tab="record" class="tab">台账</button>
       <button data-tab="uploads" class="tab">上传</button>
     </div>
+    <div id="tab-chat" class="tabpane hidden"></div>
     <div id="tab-cards" class="tabpane"></div>
     <div id="tab-record" class="tabpane hidden"></div>
     <div id="tab-uploads" class="tabpane hidden">
@@ -47,8 +49,13 @@
       <div id="uploads-list"></div>
     </div>
     <div id="freebar">
-      <textarea id="free-text" rows="2" placeholder="自由输入（可空；与当前圈选一起提交）"></textarea>
+      <select id="chat-model" class="model" title="使用的模型（role）；换模型下一轮生效"></select>
+      <textarea id="free-text" rows="2" placeholder="与 primer 的 LLM 对话（Enter 发送，Shift+Enter 换行）"></textarea>
       <button id="free-send">发送</button>
+    </div>
+    <div id="chat-foot">
+      <span id="chat-driver" class="drv bad">驱动未运行</span>
+      <span class="hintmini">消息先落盘，驱动（python3 -m primer.scene.loop）读到后回复</span>
     </div>
   </aside>
 </main>

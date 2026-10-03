@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""primer-review —— 会话舱本地服务（Phase 0：上传·画布·圈选·台账）。
+"""primer-review —— 会话舱本地服务（Phase 0：上传·画布·圈选·台账，＋ LLM 对话面板）。
 
 **定位**：把从参考输入（技术报告页面、概念图、参数表）到参数台账、模型与 manifest
 的决策过程摆进浏览器：人看图、圈注、作答；模型侧出图、提问、落账。服务本身是
-**哑文件经纪人**——所有智能在会话两端，页面只是视图。
+**哑文件经纪人**——所有智能在会话两端，页面只是视图。对话面板（``chat.jsonl`` ＋
+``chat_meta.json``）同样只读写文件：人在这里发消息，``primer.scene.loop`` 那个进程
+把消息交给所配的 LLM 并把回信写回同一个文件。
 
 **文件协议**（会话目录即协议）::
 
@@ -28,9 +30,10 @@
 
 **端点**::
 
-    GET  /                静态页面        GET  /state   全量状态
+    GET  /                静态页面        GET  /state   全量状态（含 chat 节点）
     GET  /f/<rel>         会话文件        GET  /healthz 健康检查
     POST /answer          JSON {card_id, choice, text, selections:[{image,mode,points}]}
+    POST /chat            JSON {text, model}     追加一条用户消息到 chat.jsonl
     POST /upload?name=&desc=   原始字节流；PDF 自动按页光栅化
 
 **用法**::
@@ -82,6 +85,8 @@ IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 MAX_ANSWER_BYTES = 4 * 1024 * 1024
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
+MAX_CHAT_CHARS = 8000
+CHAT_TAIL_MESSAGES = 200
 DEFAULT_DPI = 150
 DEFAULT_MAX_PAGES = 40
 
@@ -176,7 +181,48 @@ class Session:
             "uploads": self._read_jsonl(self.root / "uploads" / "index.jsonl"),
             "pages": pages,
             "answers": answers,
+            "chat": self.chat_state(),
         }
+
+    # ------------------------------------------------------------ chat
+
+    def chat_state(self) -> Dict[str, Any]:
+        """对话节点：最近 ``CHAT_TAIL_MESSAGES`` 条消息＋驱动写的 meta＋升级标记。
+
+        三个文件都可能缺失（会话刚建、驱动还没跑过）：消息回空表，meta 回 ``None``，
+        升级标记回 ``False``——页面据此显示"驱动未运行"的禁用态，而不是报错。
+        """
+        messages = self._read_jsonl(self.root / "chat.jsonl")
+        meta = self._read_json(self.root / "chat_meta.json", None)
+        return {
+            "messages": messages[-CHAT_TAIL_MESSAGES:],
+            "meta": meta if isinstance(meta, dict) else None,
+            "escalation": (self.root / "ESCALATION.md").is_file(),
+        }
+
+    def save_chat(self, payload: dict) -> dict:
+        """追加一条用户消息（``role: "user"``）；驱动按 chat.jsonl 的次序消费它。"""
+        if not isinstance(payload, dict):
+            raise ReviewError("chat body must be a JSON object")
+        text = payload.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ReviewError("chat text must be a non-empty string")
+        if len(text) > MAX_CHAT_CHARS:
+            raise ReviewError(
+                f"chat text is too long ({len(text)} > {MAX_CHAT_CHARS} characters)"
+            )
+        model = payload.get("model")
+        if model is not None and not isinstance(model, str):
+            raise ReviewError("chat model must be a string")
+        record = {
+            "ts": _now(),
+            "role": "user",
+            "text": text,
+            "model": (model or "").strip() or None,
+        }
+        with (self.root / "chat.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return {"ts": record["ts"], "chars": len(text), "model": record["model"]}
 
     # ------------------------------------------------------------ answers
 
@@ -343,6 +389,10 @@ def make_handler(review_session: Session, verbose: bool = False):
                     payload = self._read_json_body()
                     rel = self.session.save_answer(payload)
                     self._json({"ok": True, "file": rel})
+                elif url.path == "/chat":
+                    payload = self._read_json_body()
+                    record = self.session.save_chat(payload)
+                    self._json({"ok": True, "chat": record})
                 elif url.path == "/upload":
                     q = {k: v[0] for k, v in parse_qs(url.query).items()}
                     self._receive_upload(q.get("name") or "upload", q.get("desc") or "")
@@ -388,7 +438,8 @@ def _report(session: Session, url: str) -> str:
         f"  地址：{url}",
         f"  内容：画布项 {len(st['canvas'].get('items', []))}｜"
         f"问题卡 {len(cards)}（已答 {answered}）｜"
-        f"台账 {len(st['record'].get('rows', []))} 行｜页面图 {len(st['pages'])} 张",
+        f"台账 {len(st['record'].get('rows', []))} 行｜页面图 {len(st['pages'])} 张｜"
+        f"对话 {len(st['chat']['messages'])} 条",
         "  停止：Ctrl-C",
     ]
     return "\n".join(lines)

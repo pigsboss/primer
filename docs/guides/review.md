@@ -27,7 +27,10 @@ PYTHONPATH=src python3 -m primer.review.server --session <会话目录> [--port 
   cards.json     问题卡（模型侧写）：问题、选项、证据锚点
   record.json    参数台账（模型侧写；页面只读呈现）
   answers/       人的提交（服务写）：<card_id>.json 每卡一份＋_log.jsonl 流水
-  renders/       渲染回放区（Phase 2）
+  renders/       渲染回放区（Phase 2；也收环路附件的渲染图）
+  chat.jsonl     对话消息流：人写 role:"user"，环路驱动写 role:"agent"
+  chat_meta.json 环路驱动写的心跳与模型表（页面据此显示运行态与下拉框）
+  ESCALATION.md  环路升级标记（存在时页面显示警示条）
 ```
 
 服务是**哑文件经纪人**：不做任何判断，只负责收/发与状态合并；所有智能在会话两端。
@@ -72,11 +75,32 @@ PYTHONPATH=src python3 -m primer.review.server --session <会话目录> [--port 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` | 静态页面 |
-| GET | `/state` | 全量状态（canvas/cards/record/uploads/pages/answers） |
+| GET | `/state` | 全量状态（canvas/cards/record/uploads/pages/answers/chat） |
 | GET | `/f/<rel>` | 会话文件（图像等；路径穿越防护） |
 | GET | `/healthz` | 健康检查 |
-| POST | `/answer` | JSON 提交 |
+| POST | `/answer` | JSON 提交（问题卡的选项／文字／圈选） |
+| POST | `/chat` | JSON `{text, model}`：追加一条用户消息到 `chat.jsonl`（text 非空且 ≤8000 字） |
 | POST | `/upload?name=&desc=` | 原始字节流；PDF 自动按页光栅化 |
+
+`/state` 的 `chat` 节点：`{messages: 最近 200 条, meta, escalation}`。三个来源文件都可能
+缺失（会话刚建、驱动还没跑过）：消息回空表，`meta` 回 `null`，`escalation` 回 `false`。
+
+## LLM 对话面板（「对话」页签）
+
+页签栏里「对话」在「问题卡」之前，展示消息流：角色徽标（我／primer-LLM／系统）＋时间＋
+正文（保留换行）＋附件链接（点开 `/f/<ref>`）＋动作执行摘要（如「已执行：edit_params×2、
+run(build) 36.1s」）＋耗时与 token。有新 agent 消息且当前不在「对话」页签时，页签亮未读
+角点。`ESCALATION.md` 存在时页顶显示升级警示条。
+
+底部条是聊天输入区：**模型下拉框在输入框左侧**，选项来自 `state.chat.meta.models`
+（`{id: role, label: "provider/model"}`），默认选 `meta.default_role`；`Enter` 发送、
+`Shift+Enter` 换行，发送即 `POST /chat`。`meta` 缺失或 `heartbeat_ts` 超过 60 秒旧时，
+下拉框显示「驱动未运行」的禁用态——消息仍可发，它先落盘，等环路驱动起来再消费。
+
+服务本身仍是**哑文件经纪人**：它只把消息追加进 `chat.jsonl`，不做任何模型调用。真正
+调用 LLM、执行动作、写回回信的是 `primer.scene.loop`，见
+[docs/guides/scene_loop.md](scene_loop.md)。原来的「自由输入」现在就是发一条普通聊天
+消息（问题卡的选项／圈选仍走「提交本卡」）。
 
 ## 例子：2034 首个负载
 
@@ -86,5 +110,6 @@ PYTHONPATH=src python3 -m primer.review.server --session <会话目录> [--port 
 
 ## Phase 0 边界
 
-已完成：上传、画布（缩放/平移/套索/橡皮）、问题卡、只读台账、自由输入。
+已完成：上传、画布（缩放/平移/套索/橡皮）、问题卡、只读台账、LLM 对话面板（消息落盘＋
+模型下拉＋对话页签；调模型与执行动作在 `primer.scene.loop`）。
 未做（Phase 1/2）：台账双向编辑、量尺、渲染回放并排、标志点机位配准、工程包导出。

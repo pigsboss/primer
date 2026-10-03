@@ -22,6 +22,8 @@ const S = {
   choices: {},        // cardId -> option key
   cardText: {},       // cardId -> text
   seq: 0,
+  chatAgentSeen: 0,   // 上次看"对话"页签时已有的 agent 消息数（未读角点用）
+  chatScrolled: false,
 };
 
 const $ = (s) => document.querySelector(s);
@@ -642,6 +644,192 @@ async function handleFiles(files) {
   poll();
 }
 
+/* -------------------------------------------------------------- 对话 */
+
+const ROLE_LABEL = { user: "我", agent: "primer-LLM", system: "系统" };
+const DRIVER_STALE_MS = 60000;
+
+function driverLive(meta) {
+  if (!meta || !meta.heartbeat_ts) return false;
+  const t = Date.parse(meta.heartbeat_ts);
+  return !isNaN(t) && (Date.now() - t) < DRIVER_STALE_MS;
+}
+
+function actionText(a) {
+  if (!a || !a.kind) return "?";
+  if (a.kind === "run") {
+    const s = a.seconds != null ? ` ${a.seconds}s` : "";
+    return `run(${a.name || "?"})${a.ok ? s : " 失败"}`;
+  }
+  if (a.kind === "edit_params") return `edit_params×${a.edits != null ? a.edits : 0}`;
+  if (a.kind === "session_update") {
+    const bits = [];
+    if (a.record_rows) bits.push(`台账${a.record_rows}`);
+    if (a.canvas_items) bits.push(`画布${a.canvas_items}`);
+    if (a.cards) bits.push(`卡片${a.cards}`);
+    return "session_update(" + (bits.join("/") || "0") + ")";
+  }
+  if (a.kind === "escalate") return "escalate";
+  return a.kind + (a.ok === false ? "(失败)" : "");
+}
+
+function renderChat() {
+  const wrap = $("#tab-chat");
+  wrap.innerHTML = "";
+  const chat = (S.data && S.data.chat) || { messages: [], meta: null };
+  if (chat.escalation) {
+    const b = document.createElement("div");
+    b.className = "escalation";
+    b.textContent = "⚠ 本会话已置升级标记（ESCALATION.md）：有事项需要改 primer 代码，已交给 kimi code 回路。";
+    wrap.appendChild(b);
+  }
+  const messages = chat.messages || [];
+  if (!messages.length) {
+    const n = document.createElement("div");
+    n.className = "note";
+    n.textContent = "（还没有对话。在下方输入框发第一条消息；驱动会把上下文交给所配的 LLM。）";
+    wrap.appendChild(n);
+  }
+  for (const m of messages) {
+    const div = document.createElement("div");
+    div.className = "msg " + (m.role || "user");
+    const head = document.createElement("div");
+    head.className = "mhead";
+    const badge = document.createElement("span");
+    badge.className = "role " + (m.role || "user");
+    badge.textContent = ROLE_LABEL[m.role] || (m.role || "?");
+    head.appendChild(badge);
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = String(m.ts || "").replace("T", " ").slice(0, 19);
+    head.appendChild(t);
+    if (m.model) {
+      const mm = document.createElement("span");
+      mm.className = "m";
+      mm.textContent = m.model;
+      head.appendChild(mm);
+    }
+    div.appendChild(head);
+    const body = document.createElement("div");
+    body.className = "mtext";
+    body.textContent = m.text || "";
+    div.appendChild(body);
+    const acts = m.actions_executed || [];
+    if (acts.length) {
+      const a = document.createElement("div");
+      a.className = "acts";
+      a.textContent = "已执行：" + acts.map(actionText).join("、");
+      div.appendChild(a);
+    }
+    for (const ref of m.refs || []) {
+      const a = document.createElement("a");
+      a.className = "ref";
+      a.href = "/f/" + String(ref).split("/").map(encodeURIComponent).join("/");
+      a.target = "_blank";
+      a.textContent = "附件：" + ref;
+      div.appendChild(a);
+    }
+    const bits = [];
+    if (m.seconds != null) bits.push(`${m.seconds}s`);
+    if (m.usage && m.usage.total_tokens) bits.push(`tokens ${m.usage.total_tokens}`);
+    if (bits.length) {
+      const u = document.createElement("div");
+      u.className = "mmeta";
+      u.textContent = bits.join(" · ");
+      div.appendChild(u);
+    }
+    wrap.appendChild(div);
+  }
+  const nearBottom = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 160;
+  if (nearBottom || !S.chatScrolled) {
+    wrap.scrollTop = wrap.scrollHeight;
+    S.chatScrolled = true;
+  }
+}
+
+function renderChatMeta() {
+  const chat = (S.data && S.data.chat) || {};
+  const meta = chat.meta;
+  const sel = $("#chat-model");
+  const models = (meta && meta.models) || [];
+  const sig = models.map((m) => `${m.id}|${m.label}`).join(",");
+  if (sel.dataset.sig !== sig) {
+    const prev = sel.value;
+    sel.innerHTML = "";
+    if (!models.length) {
+      const o = document.createElement("option");
+      o.value = "";
+      o.textContent = "（无可用模型）";
+      sel.appendChild(o);
+    }
+    for (const m of models) {
+      const o = document.createElement("option");
+      o.value = m.id;
+      o.textContent = m.label || m.id;
+      sel.appendChild(o);
+    }
+    sel.dataset.sig = sig;
+    const fallback = (meta && meta.default_role) || (models[0] && models[0].id) || "";
+    sel.value = models.some((m) => m.id === prev) ? prev : fallback;
+  }
+  const live = driverLive(meta);
+  sel.disabled = !live || !models.length;
+  const note = $("#chat-driver");
+  if (!meta) note.textContent = "驱动未运行";
+  else if (!live) note.textContent = "驱动心跳过期";
+  else note.textContent = "驱动运行中";
+  note.className = "drv " + (live ? "ok" : "bad");
+}
+
+function updateUnread() {
+  const messages = ((S.data && S.data.chat) || {}).messages || [];
+  const agents = messages.filter((m) => m.role === "agent").length;
+  const active = $("#tabs .tab.active");
+  const chatActive = active && active.dataset.tab === "chat";
+  if (chatActive) S.chatAgentSeen = agents;
+  const badge = $("#chat-unread");
+  const diff = agents - S.chatAgentSeen;
+  if (diff > 0 && !chatActive) {
+    badge.textContent = String(diff);
+    badge.classList.remove("hidden");
+  } else {
+    badge.classList.add("hidden");
+  }
+}
+
+function activateTab(name) {
+  for (const x of document.querySelectorAll("#tabs .tab")) {
+    x.classList.toggle("active", x.dataset.tab === name);
+  }
+  for (const p of document.querySelectorAll(".tabpane")) p.classList.add("hidden");
+  const pane = $("#tab-" + name);
+  if (pane) pane.classList.remove("hidden");
+  if (name === "chat") {
+    renderChat();
+    setTimeout(updateUnread, 0);
+  }
+}
+
+async function sendChat() {
+  const text = ($("#free-text").value || "").trim();
+  const note = $("#chat-driver");
+  if (!text) {
+    note.textContent = "消息为空";
+    note.className = "drv bad";
+    return;
+  }
+  const model = $("#chat-model").value || null;
+  const r = await apiPost("/chat", { text, model });
+  if (r.ok) {
+    $("#free-text").value = "";
+    activateTab("chat");
+    await poll();
+  } else {
+    note.textContent = "发送失败：" + (r.error || "");
+    note.className = "drv bad";
+  }
+}
+
 /* -------------------------------------------------------------- 轮询 */
 
 async function poll() {
@@ -651,8 +839,11 @@ async function poll() {
     $("#status-dot").className = "dot ok";
     $("#status-text").textContent = "已连接";
     $("#session-path").textContent = st.session || "";
+    const chat = st.chat || {};
     const h = JSON.stringify([st.canvas, st.cards, st.record, (st.uploads || []).length,
-      Object.keys(st.answers || {}).length, Object.values(st.answers || {}).map((a) => a.received_at)]);
+      Object.keys(st.answers || {}).length, Object.values(st.answers || {}).map((a) => a.received_at),
+      (chat.messages || []).length, chat.escalation || false]);
+    renderChatMeta();
     if (h !== S.hash) {
       S.hash = h;
       const ch = JSON.stringify(st.canvas);
@@ -664,8 +855,10 @@ async function poll() {
       renderCards();
       renderRecord();
       renderUploads();
+      renderChat();
       updateTray();
     }
+    updateUnread();
   } catch (err) {
     $("#status-dot").className = "dot bad";
     $("#status-text").textContent = "连接断开";
@@ -689,12 +882,7 @@ function bindUI() {
   $("#tray-clear").onclick = clearTray;
 
   for (const t of document.querySelectorAll("#tabs .tab")) {
-    t.onclick = () => {
-      for (const x of document.querySelectorAll("#tabs .tab")) x.classList.remove("active");
-      for (const p of document.querySelectorAll(".tabpane")) p.classList.add("hidden");
-      t.classList.add("active");
-      $("#tab-" + t.dataset.tab).classList.remove("hidden");
-    };
+    t.onclick = () => activateTab(t.dataset.tab);
   }
 
   $("#stage").addEventListener("wheel", onWheel, { passive: false });
@@ -718,17 +906,10 @@ function bindUI() {
     if (e.dataTransfer.files.length) handleFiles([...e.dataTransfer.files]);
   });
 
-  $("#free-send").onclick = async () => {
-    const text = ($("#free-text").value || "").trim();
-    const selections = traySelections();
-    if (!text && !selections.length) { flash("自由输入为空"); return; }
-    const r = await apiPost("/answer", { card_id: "free", choice: null, text: text || null, selections });
-    if (r.ok) {
-      clearTray();
-      $("#free-text").value = "";
-      flash("已发送");
-    } else flash("发送失败：" + (r.error || ""), true);
-  };
+  $("#free-send").onclick = sendChat;
+  $("#free-text").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  });
 }
 
 bindUI();

@@ -2,8 +2,9 @@
 """review 会话舱服务测试（``python3 -m primer.review.server``）。
 
 自造会话目录＋线程服务器（127.0.0.1 临时端口），覆盖：状态合并
-（canvas／cards／record／uploads／pages／answers）、作答落盘（覆盖＋追加流水）、
-上传（图片入页池、PDF 光栅化与降级、命名消毒、防路径穿越）、错误码与静态页。
+（canvas／cards／record／uploads／pages／answers／chat）、作答落盘（覆盖＋追加流水）、
+对话消息落盘与校验（/state.chat 合并、尾部截断、坏行容错）、上传（图片入页池、PDF
+光栅化与降级、命名消毒、防路径穿越）、错误码与静态页。
 不依赖任何任务侧产物；PDF 真光栅化只在 pdftoppm 存在时执行，否则走降级分支。
 """
 
@@ -109,6 +110,73 @@ def test_healthz_and_index(live):
     assert status == 200 and h["ok"] is True
     status, html = _get(base, "/")
     assert status == 200 and "会话舱".encode("utf-8") in html
+
+
+# ------------------------------------------------------------------ 对话
+
+def test_state_chat_empty_and_tolerant(live):
+    _, base = live
+    _, st = _get(base, "/state")
+    assert st["chat"] == {"messages": [], "meta": None, "escalation": False}
+
+
+def test_post_chat_appends_and_state_merges(live):
+    session, base = live
+    status, r = _post_json(base, "/chat", {"text": "先核对长度", "model": "scene"})
+    assert status == 200 and r["ok"], r
+    assert r["chat"]["chars"] == len("先核对长度")
+    lines = (session.root / "chat.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["role"] == "user" and record["text"] == "先核对长度"
+    assert record["model"] == "scene" and record["ts"]
+
+    _, st = _get(base, "/state")
+    assert [m["text"] for m in st["chat"]["messages"]] == ["先核对长度"]
+
+    # 驱动写的 meta 与升级标记随后出现，页面据此显示运行态与警示条。
+    (session.root / "chat_meta.json").write_text(
+        json.dumps({"heartbeat_ts": "2026-10-03T12:00:00+08:00",
+                    "models": [{"id": "scene", "label": "deepseek/deepseek-flash"}],
+                    "default_role": "scene", "vision": "auto"}), encoding="utf-8")
+    (session.root / "ESCALATION.md").write_text("# 升级\n", encoding="utf-8")
+    status, st = _get(base, "/state")
+    assert st["chat"]["meta"]["default_role"] == "scene"
+    assert st["chat"]["escalation"] is True
+
+
+def test_post_chat_validation(live):
+    session, base = live
+    status, r = _post_json(base, "/chat", {"text": "   "})
+    assert status == 400 and r["ok"] is False
+    status, r = _post_json(base, "/chat", {"text": 123})
+    assert status == 400
+    status, r = _post_json(base, "/chat", {"text": "x" * 8001})
+    assert status == 400
+    status, r = _post_json(base, "/chat", {"text": "x" * 8000})
+    assert status == 200 and r["ok"]
+    status, _ = _post_bytes(base, "/chat", b"{not json")
+    assert status == 400
+    assert (session.root / "chat.jsonl").read_text(encoding="utf-8").count("\n") == 1
+
+
+def test_state_chat_tail_is_capped(live):
+    session, base = live
+    with (session.root / "chat.jsonl").open("a", encoding="utf-8") as fh:
+        for i in range(205):
+            fh.write(json.dumps({"ts": f"t{i}", "role": "user", "text": str(i)}) + "\n")
+    _, st = _get(base, "/state")
+    messages = st["chat"]["messages"]
+    assert len(messages) == 200
+    assert messages[0]["text"] == "5" and messages[-1]["text"] == "204"
+
+
+def test_state_chat_survives_a_corrupt_line(live):
+    session, base = live
+    (session.root / "chat.jsonl").write_text(
+        '{"role": "user", "text": "好的"}\nnot json\n', encoding="utf-8")
+    _, st = _get(base, "/state")
+    assert len(st["chat"]["messages"]) == 1
 
 
 # ------------------------------------------------------------------ 作答
