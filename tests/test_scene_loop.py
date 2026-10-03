@@ -845,3 +845,22 @@ def test_models_source_default_is_deduped_roles(tree):
     driver.run_once()
     meta = json.loads((session / L.META_FILENAME).read_text(encoding="utf-8"))
     assert "去重" in meta["models_source"]
+
+
+def test_answers_directory_is_in_the_round_context(tree):
+    """人的作答（answers/*.json）必须进入每一轮的上下文——否则"按作答重建"无从谈起。"""
+    project, task, session = tree
+    (session / "answers").mkdir(exist_ok=True)
+    (session / "answers" / "r2_review.json").write_text(json.dumps({
+        "card_id": "r2_review", "choice": "C", "received_at": "2026-10-03T13:58:44+08:00",
+        "text": "维持5层，但需要降低层间距；作动器太细，对照基准加粗。",
+    }, ensure_ascii=False), encoding="utf-8")
+    transport = FakeTransport([llm_reply("收到，按作答推进")])
+    driver = make_driver(tree, transport)
+    send_user(session, "请根据作答重建")
+    driver.run_once()
+    body = transport.bodies()[0]["messages"][1]["content"]
+    text = body if isinstance(body, str) else body[0]["text"]
+    assert "人的作答" in text
+    assert "维持5层，但需要降低层间距" in text
+    assert "r2_review" in text

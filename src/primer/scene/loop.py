@@ -97,6 +97,7 @@ BACKUP_DIRNAME = "_backup"
 BACKUP_KEEP = 10
 CHAT_CONTEXT_MESSAGES = 40
 CHAT_TEXT_LIMIT = 1500
+ANSWERS_TEXT_LIMIT = 2000
 STDIO_TAIL_LINES = 120
 LOCK_STALE_SECONDS = 30.0
 HEARTBEAT_STALE_SECONDS = 60.0
@@ -812,6 +813,33 @@ class Driver:
                     continue
                 text = str(card.get("text") or "")
                 lines.append(f"- {card.get('id', '?')}｜{card.get('title', '')}｜{text[:80]}")
+        else:
+            lines.append("（空）")
+        lines.append("")
+        lines.append("## 人的作答 answers/（问题卡裁决；received_at＝提交时间）")
+        answers = []
+        for f in sorted((self.session_root / "answers").glob("*.json")):
+            if f.name.startswith("_"):
+                continue
+            data = _read_json_lenient(f, None)
+            if isinstance(data, Mapping):
+                answers.append((str(data.get("received_at") or ""), f.stem, data))
+        answers.sort()
+        if answers:
+            for _, cid, data in answers:
+                bits = [f"- {cid}（{data.get('received_at', '')}）"]
+                choice = data.get("choice")
+                if choice:
+                    bits.append(f"choice={choice}")
+                text = str(data.get("text") or "").strip()
+                if text:
+                    if len(text) > ANSWERS_TEXT_LIMIT:
+                        text = text[:ANSWERS_TEXT_LIMIT] + "…"
+                    bits.append(f"text={text}")
+                sels = data.get("selections") or []
+                if sels:
+                    bits.append(f"selections={len(sels)}")
+                lines.append("｜".join(bits))
         else:
             lines.append("（空）")
         return "\n".join(lines)

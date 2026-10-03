@@ -137,7 +137,8 @@ actions:
 1. 读 `chat.jsonl`，按 `loop_state.json` 的游标取出**最后一条未处理的**用户消息（多条
    积压则逐条顺序处理、各自回复）。
 2. 组装上下文：内置纪律模板（＋`system_extra`）作 system；user 侧放 `loop.yaml` 全文、
-   参数库全文、`record.json`／`cards.json` 摘要、近 40 条聊天记录、本轮用户消息；可选附
+   参数库全文、`record.json`／`cards.json` 摘要、**`answers/` 全部人的作答**（含
+   `received_at`，供对照"哪些是新裁决"）、近 40 条聊天记录、本轮用户消息；可选附
    最近 N 张渲染图（JPEG q80、单张 ≤4 MB 的 data-URI）。端点若以 HTTP 4xx 拒绝图片，
    自动降级为纯文本重试一次，并在 `loop_log.jsonl` 记一笔。
 3. 调所配 LLM，取回正文、usage（含 `reasoning_tokens`）、耗时、模型名。
