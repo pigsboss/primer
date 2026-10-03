@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from primer.config import load_config
-from primer.llm import LlmHttpError, LlmTransportError
+from primer.llm import LlmHttpError, LlmReplyError, LlmTransportError
 from primer.scene import loop as L
 
 KEY = "unit-test-secret-key"
