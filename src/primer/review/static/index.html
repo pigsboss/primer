@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>primer 会话舱</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">primer 会话舱<sup>Phase 0</sup></div>
+  <div class="meta" id="session-path" title="会话目录"></div>
+  <div class="status"><span id="status-dot" class="dot"></span><span id="status-text">连接中…</span></div>
+</header>
+<main>
+  <section id="stage-wrap">
+    <div id="toolbar">
+      <button data-tool="pan" class="tool active" id="tool-pan">平移</button>
+      <button data-tool="lasso" class="tool" id="tool-lasso">套索</button>
+      <button data-tool="erase" class="tool" id="tool-erase">橡皮</button>
+      <span class="sep"></span>
+      <label class="chk"><input type="checkbox" id="show-annot" checked> 显示标注</label>
+      <button id="fit-btn" class="ghost">适应视图</button>
+      <span class="sep"></span>
+      <span id="tray" class="tray">待提交：0 项</span>
+      <button id="tray-clear" class="ghost">清空选择</button>
+    </div>
+    <div id="stage"><div id="world"></div></div>
+    <div id="hint">滚轮缩放 · 拖拽平移 · 套索圈选 / 橡皮擦除我的预选区域 · 圈选与文字随下一份提交一同发送</div>
+  </section>
+  <aside id="panel">
+    <div id="tabs">
+      <button data-tab="cards" class="tab active">问题卡</button>
+      <button data-tab="record" class="tab">台账</button>
+      <button data-tab="uploads" class="tab">上传</button>
+    </div>
+    <div id="tab-cards" class="tabpane"></div>
+    <div id="tab-record" class="tabpane hidden"></div>
+    <div id="tab-uploads" class="tabpane hidden">
+      <div id="dropzone">
+        <div class="dz-line">拖入文件（PDF / 图片），或</div>
+        <input type="file" id="file-input" multiple>
+        <input type="text" id="upload-desc" placeholder="描述：例如 IAC 论文；第 3 页 fig3 是探测器构型">
+        <button id="upload-btn">上传</button>
+        <div id="upload-note" class="note"></div>
+      </div>
+      <div id="uploads-list"></div>
+    </div>
+    <div id="freebar">
+      <textarea id="free-text" rows="2" placeholder="自由输入（可空；与当前圈选一起提交）"></textarea>
+      <button id="free-send">发送</button>
+    </div>
+  </aside>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

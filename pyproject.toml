@@ -32,6 +32,7 @@ primer-imgtile = "primer.imgcmp.tiler:main"
 primer-imgfeat = "primer.imgcmp.feat:main"
 primer-imgpose = "primer.imgcmp.pose:main"
 primer-imgtriage = "primer.imgcmp.triage:main"
+primer-review = "primer.review.server:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "primer.__version__" }
@@ -43,6 +44,7 @@ include = ["primer*"]
 [tool.setuptools.package-data]
 "primer.digest" = ["rules_examples/*.yml"]
 "primer.book" = ["templates/*.tmpl"]
+"primer.review" = ["static/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
