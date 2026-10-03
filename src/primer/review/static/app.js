@@ -460,7 +460,7 @@ function renderCards() {
       div.appendChild(p);
     }
 
-    if (c.attach && c.attach.image && c.attach.overlay) {
+    if (c.attach && c.attach.image) {
       const b = document.createElement("button");
       b.className = "ghost";
       b.textContent = "看图";
