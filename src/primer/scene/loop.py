@@ -138,6 +138,9 @@ _SYSTEM_PROMPT = """你是 primer 会话舱环路里的建模／评审代理，�
 4. 需要修改 primer 源码（src/primer/**）才能推进时，用 escalate 动作块交给 kimi code
    回路；你不得自行修改 primer 源码，也不要声称已经改过。
 5. 与用户对话用中文；参数名、文件名、命令名、状态码保持原文。
+6. **看清再答**：回答前先声明本轮你实际看到哪些图（按文件名，见"随信图片"清单）。
+   若用户的问题指向某张图或某个问题卡，而那张图不在随信图片里，直接说"这张图我看不到"，
+   不得用其他图片替代回答，也不要凭想象描述它。
 
 动作块：放在正文之后，一个 ```actions 围栏，内容是 YAML（JSON 也认）。没有动作就整个省略。
 ```actions
@@ -391,6 +394,86 @@ def merge_by_id(existing: Sequence[Any], incoming: Sequence[Any]) -> Tuple[List[
     return merged, added, replaced
 
 
+_CARD_NUMBER_RE = re.compile(r"(?:第\s*)?(\d{1,3})\s*(?:个)?(?:问题)?卡|卡\s*(\d{1,3})|[Qq](\d{1,3})(?!\d)")
+_FILENAME_RE = re.compile(r"([\w\-.]+\.[Pp][Nn][Gg]|[\w\-.]+\.[Jj][Pp][Ee]?[Gg]|[\w\-.]+\.[Ww][Ee][Bb][Pp])")
+_TOKEN_RE = re.compile(r"[\w\-]{4,}")
+
+
+def _read_json_lenient(path: Path, default: Any) -> Any:
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def _add_card_by_title(cards: Any, number: int, add_card_image: Any) -> bool:
+    """按卡面标题号（"14. …" / "14、…"）找卡并附图；命中返回 True。"""
+    hit = False
+    for card in cards:
+        if not isinstance(card, Mapping):
+            continue
+        title = str(card.get("title") or "")
+        if re.match(rf"^{number}\s*[.、]", title):
+            add_card_image(card)
+            hit = True
+    return hit
+
+
+def resolve_referenced_images(
+    session_root: Any, task_root: Any, text: str, limit: int
+) -> List[Path]:
+    """从用户消息里解析"被引用的图"：问题卡号／图片文件名／画布项 id。
+
+    返回按引用顺序去重的绝对路径（只收确实存在的文件，最多 ``limit`` 张）。
+    定位不到的引用保持"找不到"——由系统提示词的纪律要求模型如实说看不到。
+    """
+    text = str(text or "")
+    if not text or limit <= 0:
+        return []
+    session_root = Path(session_root)
+    task_root = Path(task_root)
+    found: List[Path] = []
+
+    def add(path: Path) -> None:
+        if path.is_file() and path not in found and len(found) < limit:
+            found.append(path)
+
+    cards = _read_json_lenient(session_root / "cards.json", {}).get("cards") or []
+    canvas = _read_json_lenient(session_root / "canvas.json", {}).get("items") or []
+
+    def add_card_image(card: Any) -> None:
+        if not isinstance(card, Mapping):
+            return
+        attach = card.get("attach")
+        image = attach.get("image") if isinstance(attach, Mapping) else None
+        if isinstance(image, str) and image:
+            add(session_root / image)
+
+    for match in _CARD_NUMBER_RE.finditer(text):
+        number = int(next(g for g in match.groups() if g))
+        # 标题号优先：卡面自编号（"14. …"）是给用户看的，列表序不是。
+        if not _add_card_by_title(cards, number, add_card_image):
+            if 1 <= number <= len(cards):
+                add_card_image(cards[number - 1])
+
+    name_dirs = (
+        session_root, session_root / "pages", session_root / "renders",
+        task_root, task_root / "out" / "still",
+        task_root / "out" / "still" / "view", task_root / "out" / "still" / "match",
+    )
+    for match in _FILENAME_RE.finditer(text):
+        name = match.group(1)
+        for base in name_dirs:
+            add(base / name)
+
+    ids = {str(item.get("id")): item for item in canvas if isinstance(item, Mapping)}
+    for token in _TOKEN_RE.findall(text):
+        item = ids.get(token)
+        if item and isinstance(item.get("image"), str):
+            add(session_root / item["image"])
+    return found
+
+
 def collect_images(task_root: Any, pattern: str, limit: int) -> List[Path]:
     """任务根下按 glob 找图片，按修改时间从新到旧，取前 ``limit`` 张。"""
     if not pattern or limit <= 0:
@@ -621,7 +704,8 @@ class Driver:
             .replace("<<COMMANDS>>", ", ".join(self.loop.commands) or "（无）")
             .replace(
                 "<<IMAGES>>",
-                f"{glob}（vision={self.vision}，最多 {self.loop.images_max} 张）",
+                f"{glob}（vision={self.vision}，最多 {self.loop.images_max} 张）；"
+                "当用户消息引用了某问题卡/图片文件名/画布项时，被引用的图优先随附",
             )
         )
         if self.loop.system_extra.strip():
@@ -680,10 +764,22 @@ class Driver:
             lines.append(f"[{item.get('ts', '')}] {role}: {text}")
         return "\n".join(lines)
 
-    def _context_images(self) -> List[str]:
-        if self.vision != "auto" or not self.loop.images_glob:
+    def _context_images(self, message: Mapping[str, Any]) -> List[str]:
+        """本轮随信图片：用户消息引用的图优先（问题卡附图/文件名/画布项 id），
+        再用 loop.yaml 的 images.glob 按时间补足到上限。"""
+        if self.vision == "off":
             return []
-        return [str(p) for p in collect_images(self.task_root, self.loop.images_glob, self.loop.images_max)]
+        images: List[Path] = resolve_referenced_images(
+            self.session_root, self.task_root,
+            str(message.get("text") or ""), self.loop.images_max,
+        )
+        if len(images) < self.loop.images_max and self.loop.images_glob:
+            for path in collect_images(self.task_root, self.loop.images_glob, self.loop.images_max):
+                if path not in images:
+                    images.append(path)
+                if len(images) >= self.loop.images_max:
+                    break
+        return [str(p) for p in images[: self.loop.images_max]]
 
     def _chat_index(self, message: Mapping[str, Any]) -> int:
         """这条消息在 chat.jsonl 里的下标；找不着就当作最后一条。"""
@@ -697,6 +793,24 @@ class Driver:
                 return position
         return max(0, len(chat) - 1)
 
+    def _images_section(self, message: Mapping[str, Any], images: Sequence[str]) -> str:
+        """随信图片清单：模型据此在回答前声明"我看到了什么"。"""
+        if not images:
+            return "## 随信图片\n（本轮无图——你看不到任何图片，回答前先说明这一点）"
+        referenced = {
+            p.name
+            for p in resolve_referenced_images(
+                self.session_root, self.task_root,
+                str(message.get("text") or ""), self.loop.images_max,
+            )
+        }
+        lines = ["## 随信图片（你实际看到的就是这些，回答前先在此清单内声明）"]
+        for path in images:
+            name = Path(path).name
+            tag = "用户引用" if name in referenced else "默认最近图"
+            lines.append(f"- {name}（{tag}）")
+        return "\n".join(lines)
+
     def _build_messages(self, message: Mapping[str, Any], images: Sequence[str]) -> List[dict]:
         index = self._chat_index(message)
         body = "\n\n".join(
@@ -704,6 +818,7 @@ class Driver:
                 "## loop.yaml\n```yaml\n" + self.loop.path.read_text(encoding="utf-8") + "\n```",
                 f"## 参数库 {self.loop.params_file}\n```yaml\n{self._params_text()}\n```",
                 self._session_summary(),
+                self._images_section(message, images),
                 "## 最近 %d 条对话\n%s" % (CHAT_CONTEXT_MESSAGES, self._history_text(index)),
                 "## 本轮用户消息\n" + str(message.get("text") or ""),
             ]
@@ -781,7 +896,7 @@ class Driver:
 
     def _exchange(self, client: ChatClient, message: Mapping[str, Any]):
         """调 LLM；端点因图片报 4xx 时降级为纯文本重试一次。"""
-        images = self._context_images()
+        images = self._context_images(message)
         messages = self._build_messages(message, images)
         try:
             return client.complete(messages), False

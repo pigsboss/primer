@@ -680,3 +680,100 @@ def test_loop_config_validation_reports_missing_fields(tmp_path):
     with pytest.raises(L.LoopError) as caught:
         L.load_loop_config(bad)
     assert "params_file" in str(caught.value)
+
+
+# ---------------------------------------------------------------- 引用附图
+
+def test_referenced_card_image_is_attached_first(tree):
+    """消息引用"第 N 个问题卡"时，该卡附图必须进入本轮随信图片（用户引用优先）。"""
+    project, task, session = tree
+    write_png(session / "pages" / "mid.png")
+    (session / "cards.json").write_text(json.dumps({"cards": [
+        {"id": "c1", "title": "1. 甲", "text": "x"},
+        {"id": "c2", "title": "2. 乙", "text": "x",
+         "attach": {"image": "pages/mid.png", "overlay": None}},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    transport = FakeTransport([llm_reply("我看到了 pages/mid.png")])
+    driver = make_driver(tree, transport, vision="auto")
+    send_user(session, "第 2 个问题卡附图里为什么看不到遮光罩？")
+    driver.run_once()
+
+    content = transport.bodies()[0]["messages"][1]["content"]
+    assert isinstance(content, list), "引用的图必须随信附上"
+    images = [part for part in content if isinstance(part, dict) and part.get("type") == "image_url"]
+    assert len(images) == 1
+    body_text = content[0]["text"]
+    assert "随信图片" in body_text and "用户引用" in body_text and "mid.png" in body_text
+
+
+def test_referenced_filename_and_canvas_id_resolve(tree):
+    project, task, session = tree
+    write_png(session / "pages" / "r2_midstage.png")
+    (session / "canvas.json").write_text(json.dumps({"items": [
+        {"id": "r2_midstage", "image": "pages/r2_midstage.png", "w": 8, "h": 8}
+    ]}, ensure_ascii=False), encoding="utf-8")
+    transport = FakeTransport([llm_reply("ok")])
+    driver = make_driver(tree, transport, vision="auto")
+    send_user(session, "请看 r2_midstage.png 回答")
+    driver.run_once()
+    content = transport.bodies()[0]["messages"][1]["content"]
+    assert isinstance(content, list)
+    images = [part for part in content if isinstance(part, dict) and part.get("type") == "image_url"]
+    assert len(images) == 1, "文件名/画布项 id 两种引用都指向同一张图，应去重为一张"
+
+
+def test_referenced_image_takes_the_slot_before_glob_images(tree):
+    project, task, session = tree
+    write_png(session / "pages" / "mid.png")
+    write_png(task / "out" / "render.png")
+    (session / "cards.json").write_text(json.dumps({"cards": [
+        {"id": "c1", "title": "1. 甲", "text": "x",
+         "attach": {"image": "pages/mid.png", "overlay": None}},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    transport = FakeTransport([llm_reply("ok")])
+    driver = make_driver(tree, transport, vision="auto")
+    send_user(session, "第 1 个问题卡图里有什么？")
+    driver.run_once()
+    body_text = transport.bodies()[0]["messages"][1]["content"][0]["text"]
+    assert "mid.png（用户引用）" in body_text
+    assert "render.png（默认最近图）" in body_text
+
+
+def test_unresolvable_reference_leaves_only_glob_images(tree):
+    project, task, session = tree
+    write_png(task / "out" / "render.png")
+    transport = FakeTransport([llm_reply("这张图我看不到")])
+    driver = make_driver(tree, transport, vision="auto")
+    send_user(session, "第 99 个问题卡附图里为什么看不到遮光罩？")
+    driver.run_once()
+    body_text = transport.bodies()[0]["messages"][1]["content"][0]["text"]
+    assert "mid" not in body_text  # 定位不到就不附；纪律要求模型明说看不到
+    assert "render.png（默认最近图）" in body_text
+
+
+def test_system_prompt_carries_the_look_before_you_answer_discipline(tree):
+    project, task, session = tree
+    transport = FakeTransport([llm_reply("ok")])
+    driver = make_driver(tree, transport)
+    send_user(session, "你好")
+    driver.run_once()
+    system = transport.bodies()[0]["messages"][0]["content"]
+    assert "看清再答" in system and "这张图我看不到" in system
+
+
+def test_card_number_matches_title_before_list_position(tree):
+    """卡面标题号优先于列表序：列表第 2 位是甲、标题"2."的是乙时，"第 2 个问题卡"取乙。"""
+    project, task, session = tree
+    write_png(session / "pages" / "by_title.png")
+    write_png(session / "pages" / "by_index.png")
+    (session / "cards.json").write_text(json.dumps({"cards": [
+        {"id": "a", "title": "2. 按标题命中", "attach": {"image": "pages/by_title.png"}},
+        {"id": "b", "title": "1. 列表第二位", "attach": {"image": "pages/by_index.png"}},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    transport = FakeTransport([llm_reply("ok")])
+    driver = make_driver(tree, transport, vision="auto")
+    send_user(session, "第 2 个问题卡里说明了什么？")
+    driver.run_once()
+    body_text = transport.bodies()[0]["messages"][1]["content"][0]["text"]
+    assert "by_title.png" in body_text
+    assert "by_index.png" not in body_text
