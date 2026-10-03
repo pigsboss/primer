@@ -25,12 +25,20 @@ PYTHONPATH=src python3 -m primer.scene.loop \
 - `--role` 默认模型（默认 `scene`）；人在这条消息上选的模型（界面下拉框）优先于它。
 - `--interval` 轮询间隔秒数（默认 2）；`--once` 只处理当前积压的消息然后退出。
 - `--no-actions` 只解析动作块、不执行（回信里注明未执行）。
-- `--vision auto|off`：`auto` 且 `loop.yaml` 声明了 `images` 时，附上最近的渲染图。
+- `--vision auto|off`：`auto` 时随信附图——用户消息引用过的图优先（问题卡号按卡面标题号优先解析、图片文件名、画布项 id，见「引用附图」一节），再用 `loop.yaml` 的 `images.glob` 按时间补足到 `images.max`。
 - `--project-root`／`--config` 通常不必给：默认从 `--task` 向上找带 `_primer/config.yaml`
   的那一层。
 
 `pyproject.toml` 里的 `primer-sceneloop` 短名仅安装后存在，**本工程不使用**，一律按
 `python3 -m` 调用。
+
+## 引用附图（「看清再答」）
+
+用户在消息里引用的图会被优先附进本轮上下文：
+
+- 问题卡号：`第 14 个问题卡`／`卡14`／`q3` → 解析到卡后附其 `attach.image`（**卡面标题号优先于列表序**——列表顺序不是给用户看的编号）；
+- 文件与画布项：`r2_midstage.png` 这类文件名，或画布项 id，按会话 `pages/`、`renders/` 与任务 `out/still/**` 搜索；
+- 定位不到的引用不附任何替代图；系统提示词含纪律条款：回答前先按「随信图片」清单声明看到了什么，引用图不在清单里时必须明说看不到，不得用其他图替代作答。
 
 ## 会话目录协议
 
