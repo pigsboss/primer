@@ -136,8 +136,9 @@ table.record tr.rowlink:hover { background: #1d2530; }
   display: flex; gap: 8px; background: var(--panel);
 }
 #freebar textarea {
-  flex: 1 1 auto; resize: none; background: #0e1116; color: var(--text);
+  flex: 1 1 auto; resize: vertical; background: #0e1116; color: var(--text);
   border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: inherit;
+  min-height: 36px; max-height: 55vh;
 }
 #freebar select.model {
   flex: 0 0 auto; max-width: 46%;

@@ -777,3 +777,71 @@ def test_card_number_matches_title_before_list_position(tree):
     body_text = transport.bodies()[0]["messages"][1]["content"][0]["text"]
     assert "by_title.png" in body_text
     assert "by_index.png" not in body_text
+
+
+# ---------------------------------------------------------------- 模型表
+
+def _cfg_with_shared_endpoints(tmp_path):
+    cfg = tmp_path / "config2.yaml"
+    cfg.write_text("""providers:
+  demo:
+    base_url: https://api.example.invalid/v1
+    key_env: PRIMER_DEMO_API_KEY
+roles:
+  scene:
+    provider: demo
+    model: demo-model
+  vision:
+    provider: demo
+    model: demo-model
+  claims:
+    provider: demo
+    model: demo-model
+  distill:
+    provider: demo
+    model: demo-strong
+""", encoding="utf-8")
+    environ = {"XDG_CONFIG_HOME": str(tmp_path / "xdg"), "HOME": str(tmp_path)}
+    return load_config(tmp_path, cfg, environ=environ)
+
+
+def test_models_dedupe_by_endpoint_and_keep_default(tmp_path):
+    config = _cfg_with_shared_endpoints(tmp_path)
+    models = L.build_models(config, "claims")
+    labels = [m["label"] for m in models]
+    assert labels.count("demo/demo-model") == 1, "同端点必须折叠成一项"
+    assert "demo/demo-strong" in labels
+    assert models[0]["id"] == "claims", "默认 role 被去重掉时必须置顶补回"
+
+
+def test_explicit_models_respected_in_order_and_labels(tree):
+    project, task, session = tree
+    cfg = Path("tests")  # unused
+    loop_path = task / "loop.yaml"
+    loop_path.write_text(
+        "task: t\nparams_file: params.yaml\neditable: [params.yaml]\n"
+        "commands:\n  build: [python3, -c, 'print(1)']\n"
+        "models:\n  - {role: distill, label: '强模型'}\n  - scene\n  - {role: nope}\n",
+        encoding="utf-8",
+    )
+    transport = FakeTransport([llm_reply("ok")])
+    driver = make_driver(tree, transport)
+    send_user(session, "你好")
+    driver.run_once()
+    meta = json.loads((session / L.META_FILENAME).read_text(encoding="utf-8"))
+    ids = [m["id"] for m in meta["models"]]
+    labels = [m["label"] for m in meta["models"]]
+    assert ids == ["distill", "scene", "nope"], "显式清单按序呈现"
+    assert labels[0] == "强模型" and labels[1] == "demo/demo-model"
+    assert labels[2] == "nope（未配置）"
+    assert meta["models_source"].startswith("loop.yaml:models")
+
+
+def test_models_source_default_is_deduped_roles(tree):
+    project, task, session = tree
+    transport = FakeTransport([llm_reply("ok")])
+    driver = make_driver(tree, transport)
+    send_user(session, "你好")
+    driver.run_once()
+    meta = json.loads((session / L.META_FILENAME).read_text(encoding="utf-8"))
+    assert "去重" in meta["models_source"]

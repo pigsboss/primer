@@ -774,6 +774,9 @@ function renderChatMeta() {
   }
   const live = driverLive(meta);
   sel.disabled = !live || !models.length;
+  sel.title = meta && meta.models_source
+    ? "模型清单来源：" + meta.models_source
+    : "模型清单来源：未知（驱动未写 chat_meta）";
   const note = $("#chat-driver");
   if (!meta) note.textContent = "驱动未运行";
   else if (!live) note.textContent = "驱动心跳过期";
@@ -912,6 +915,20 @@ function bindUI() {
   });
 }
 
+function bindChatInput() {
+  const ta = $("#free-text");
+  if (!ta) return;
+  const saved = Number(localStorage.getItem("primerChatInputHeight") || 0);
+  if (saved > 30) ta.style.height = saved + "px";
+  ta.addEventListener("mouseup", () => {
+    if (ta.style.height) localStorage.setItem("primerChatInputHeight", parseInt(ta.style.height, 10) || 0);
+  });
+  ta.addEventListener("keyup", () => {
+    if (ta.style.height) localStorage.setItem("primerChatInputHeight", parseInt(ta.style.height, 10) || 0);
+  });
+}
+
 bindUI();
+bindChatInput();
 poll();
 setInterval(poll, POLL_MS);

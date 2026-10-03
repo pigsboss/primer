@@ -73,6 +73,18 @@ system_extra: |                        # 可选：追加在纪律模板后面的
   任务背景：……
 ```
 
+## 模型清单（下拉框的数据源）
+
+下拉框内容由驱动写入会话 `chat_meta.json` 的 `models`，两个来源按优先级：
+
+1. **`loop.yaml` 的 `models:`（显式清单，推荐）**——按清单顺序原样呈现，支持字符串或 `{role, label}`；未配置的 role 会显示为「`<role>（未配置）`」。例：
+   ```yaml
+   models: [scene, {role: distill, label: '强模型（订阅）'}]
+   ```
+2. 缺省（未写 `models:`）＝config 全部 roles **按 provider/model 端点去重**（同一端点的多个 role 名折叠为一项，取排序靠前者；默认 role 若被折叠则取其名）。
+
+页面里把鼠标悬停在下拉框上会显示当前来源（`models_source`）。换模型下一轮生效；模型名与端点仍以 `_primer/config.yaml` 的 roles 表为准（清单只选 role，不定义端点）。
+
 ## 动作块语法
 
 回信正文之后放一个 ```actions 围栏，内容是 YAML（JSON 也认，```yaml／```json 围栏也

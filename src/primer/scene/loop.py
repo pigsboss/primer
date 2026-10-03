@@ -192,6 +192,7 @@ class LoopConfig:
     images_max: int = DEFAULT_IMAGES_MAX
     system_extra: str = ""
     command_timeout: float = DEFAULT_COMMAND_TIMEOUT
+    models: Tuple[Mapping[str, str], ...] = ()
 
 
 def load_loop_config(path: Any) -> LoopConfig:
@@ -261,6 +262,29 @@ def load_loop_config(path: Any) -> LoopConfig:
     if not isinstance(task, str):
         raise LoopError(f"loop file {source}: `task` must be a string")
 
+    models_raw = raw.get("models")
+    models: List[Dict[str, str]] = []
+    if models_raw is not None:
+        if not isinstance(models_raw, list):
+            raise LoopError(f"loop file {source}: `models` must be a list")
+        for entry in models_raw:
+            if isinstance(entry, str) and entry.strip():
+                models.append({"role": entry.strip(), "label": ""})
+            elif isinstance(entry, Mapping):
+                role = entry.get("role")
+                if not isinstance(role, str) or not role.strip():
+                    raise LoopError(
+                        f"loop file {source}: `models[].role` must be a non-empty string"
+                    )
+                label = entry.get("label", "")
+                if not isinstance(label, str):
+                    raise LoopError(f"loop file {source}: `models[].label` must be a string")
+                models.append({"role": role.strip(), "label": label.strip()})
+            else:
+                raise LoopError(
+                    f"loop file {source}: `models` entries must be strings or mappings"
+                )
+
     return LoopConfig(
         path=source.resolve(),
         task=task,
@@ -271,6 +295,7 @@ def load_loop_config(path: Any) -> LoopConfig:
         images_max=images_max,
         system_extra=extra,
         command_timeout=float(timeout),
+        models=tuple(models),
     )
 
 
@@ -486,24 +511,65 @@ def collect_images(task_root: Any, pattern: str, limit: int) -> List[Path]:
     return files[:limit]
 
 
-def build_models(config: Any, default_role: str) -> List[dict]:
-    """chat_meta 的模型表：先 scene/distill/vision/claims/select，其余按字母序。"""
-    preferred = ("scene", "distill", "vision", "claims", "select")
+def build_models(
+    config: Any, default_role: str, explicit: Sequence[Mapping[str, str]] = ()
+) -> List[dict]:
+    """chat_meta 的模型表（下拉框的数据源）。
+
+    显式清单（``loop.yaml`` 的 ``models:``）优先：**按清单顺序原样呈现**，label 缺省
+    时用 ``provider/model``；未显式声明时＝config 全部 roles 按 **provider/model 端点
+    去重**（同一端点的多个 role 名折叠为一项，取排序靠前的那个）。默认 role 永远在表
+    内（被去重掉时置顶补回），免得下拉框选不到默认值。
+    """
     roles = {
         name: role
         for name, role in config.roles.items()
         if role.provider and role.model
     }
+    models: List[dict] = []
+    seen_ids = set()
+
+    def label_for(role_name: str) -> str:
+        role = roles.get(role_name)
+        return f"{role.provider}/{role.model}" if role is not None else f"{role_name}（未配置）"
+
+    if explicit:
+        for entry in explicit:
+            role_name = str(entry.get("role") or "").strip()
+            if not role_name or role_name in seen_ids:
+                continue
+            label = str(entry.get("label") or "").strip() or label_for(role_name)
+            models.append({"id": role_name, "label": label})
+            seen_ids.add(role_name)
+        if default_role and default_role not in seen_ids:
+            models.insert(0, {"id": default_role, "label": label_for(default_role)})
+        return models
+
+    preferred = ("scene", "distill", "vision", "claims", "select")
     ordered = [name for name in preferred if name in roles]
     ordered += sorted(name for name in roles if name not in preferred)
-    models = [
-        {"id": name, "label": f"{roles[name].provider}/{roles[name].model}"} for name in ordered
-    ]
-    if default_role and default_role not in roles and default_role not in [
-        m["id"] for m in models
-    ]:
-        # 默认 role 解析不出来时也让界面看见它，免得下拉框空着没有任何线索。
-        models.insert(0, {"id": default_role, "label": default_role})
+    seen_endpoints = set()
+    by_endpoint: Dict[tuple, dict] = {}
+    for name in ordered:
+        role = roles[name]
+        endpoint = (role.provider, role.model)
+        if endpoint in seen_endpoints:
+            continue
+        seen_endpoints.add(endpoint)
+        entry = {"id": name, "label": f"{role.provider}/{role.model}"}
+        models.append(entry)
+        by_endpoint[endpoint] = entry
+        seen_ids.add(name)
+
+    if default_role and default_role not in seen_ids:
+        role = roles.get(default_role)
+        covered = by_endpoint.get((role.provider, role.model)) if role is not None else None
+        if covered is not None:
+            # 默认 role 的端点已被保留项覆盖：改名（同一端点的 role 名等价），
+            # 而不是再加一行同标签的重复项。
+            covered["id"] = default_role
+        else:
+            models.insert(0, {"id": default_role, "label": label_for(default_role)})
     return models
 
 
@@ -992,9 +1058,15 @@ class Driver:
         touch_lock(self.lock_path)
 
     def _update_meta(self) -> None:
+        source = (
+            "loop.yaml:models（显式清单）"
+            if self.loop.models
+            else "config:roles（按 provider/model 去重）"
+        )
         meta = {
             "heartbeat_ts": _now(),
-            "models": build_models(self.config, self.default_role),
+            "models": build_models(self.config, self.default_role, self.loop.models),
+            "models_source": source,
             "default_role": self.default_role,
             "vision": self.vision,
         }
@@ -1291,7 +1363,7 @@ def _discover_project_root(task_root: Path) -> Path:
 
 
 def _startup_report(driver: Driver, project_root: Path, interval: float) -> str:
-    models = build_models(driver.config, driver.default_role)
+    models = build_models(driver.config, driver.default_role, driver.loop.models)
     labels = "、".join(f"{m['id']}={m['label']}" for m in models) or "（无）"
     commands = "、".join(driver.loop.commands) or "（无）"
     editable = "、".join(driver.loop.editable)
