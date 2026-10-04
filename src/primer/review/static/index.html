@@ -13,21 +13,38 @@
   <div class="status"><span id="status-dot" class="dot"></span><span id="status-text">连接中…</span></div>
 </header>
 <main>
+  <aside id="assets">
+    <div id="assets-head" title="资产树：模型／画布投放／渲染产出／上传基准；点节点决定中间面板的视图">资产</div>
+    <div id="tree"></div>
+  </aside>
+  <div id="left-grip" title="拖动调整资产树宽度；拖到最窄自动收起（收起后拖回即展开）；双击复位"></div>
   <section id="stage-wrap">
     <div id="toolbar">
-      <button data-tool="pan" class="tool active" id="tool-pan">平移</button>
-      <button data-tool="lasso" class="tool" id="tool-lasso">套索</button>
-      <button data-tool="erase" class="tool" id="tool-erase">橡皮</button>
+      <span id="tools2d" class="tgroup">
+        <button data-tool="pan" class="tool active" id="tool-pan">平移</button>
+        <button data-tool="lasso" class="tool" id="tool-lasso">套索</button>
+        <button data-tool="erase" class="tool" id="tool-erase">橡皮</button>
+        <span class="sep"></span>
+        <label class="chk"><input type="checkbox" id="show-annot" checked> 显示标注</label>
+        <button id="fit-btn" class="ghost">适应视图</button>
+        <span class="sep"></span>
+        <span id="tray" class="tray">待提交：0 项</span>
+        <button id="tray-clear" class="ghost">清空选择</button>
+      </span>
+      <span id="tools3d" class="tgroup hidden">
+        <button id="reset-view" class="ghost">重置视角</button>
+        <label class="chk"><input type="checkbox" id="wire-toggle"> 线框</label>
+        <label class="chk"><input type="checkbox" id="grid-toggle" checked> 网格/坐标轴</label>
+        <span id="model-stats" class="tray"></span>
+      </span>
       <span class="sep"></span>
-      <label class="chk"><input type="checkbox" id="show-annot" checked> 显示标注</label>
-      <button id="fit-btn" class="ghost">适应视图</button>
-      <span class="sep"></span>
-      <span id="tray" class="tray">待提交：0 项</span>
-      <button id="tray-clear" class="ghost">清空选择</button>
+      <button id="panel-toggle" class="ghost" title="隐藏右侧面板（对话/问题卡/台账/上传），画布占满整宽；再点恢复">隐藏面板</button>
     </div>
     <div id="stage"><div id="world"></div></div>
+    <div id="stage3d" class="hidden"><canvas id="gl"></canvas><div id="gl-note" class="note"></div></div>
     <div id="hint">滚轮缩放 · 拖拽平移 · 套索圈选 / 橡皮擦除我的预选区域 · 圈选与文字随下一份提交一同发送</div>
   </section>
+  <div id="panel-grip" title="拖动调整面板宽度；拖到最窄自动收起；双击复位"></div>
   <aside id="panel">
     <div id="tabs">
       <button data-tab="chat" class="tab">对话<span id="chat-unread" class="unread hidden">0</span></button>
@@ -48,14 +65,15 @@
       </div>
       <div id="uploads-list"></div>
     </div>
+    <div id="composer-grip" title="拖动调整输入框高度；双击复位"></div>
     <div id="freebar">
-      <select id="chat-model" class="model" title="使用的模型（role）；换模型下一轮生效"></select>
-      <textarea id="free-text" rows="2" placeholder="与 primer 的 LLM 对话（Enter 发送，Shift+Enter 换行）"></textarea>
-      <button id="free-send">发送</button>
-    </div>
-    <div id="chat-foot">
-      <span id="chat-driver" class="drv bad">驱动未运行</span>
-      <span class="hintmini">消息先落盘，驱动（python3 -m primer.scene.loop）读到后回复</span>
+      <textarea id="free-text" rows="3" placeholder="与 primer 的 LLM 对话（Enter 发送，Shift+Enter 换行）"></textarea>
+      <div id="freebar-actions">
+        <select id="chat-model" class="model" title="使用的模型（role）；换模型下一轮生效"></select>
+        <span id="chat-driver" class="drv bad">驱动未运行</span>
+        <span class="hintmini">消息先落盘，驱动（python3 -m primer.scene.loop）读到后回复</span>
+        <button id="free-send">发送</button>
+      </div>
     </div>
   </aside>
 </main>

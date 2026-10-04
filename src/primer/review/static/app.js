@@ -12,8 +12,6 @@ const POLL_MS = 1500;
 const S = {
   data: null,
   hash: "",
-  canvasHash: "",
-  fitted: false,
   layout: {},         // itemId -> {x, y, w, h}
   T: { x: 40, y: 40, k: 1 },
   tool: "pan",
@@ -24,10 +22,20 @@ const S = {
   seq: 0,
   chatAgentSeen: 0,   // 上次看"对话"页签时已有的 agent 消息数（未读角点用）
   chatScrolled: false,
+  asset: null,        // 当前选中资产节点（/state.assets.tree 里的一个节点）
+  treeHash: "",       // 资产树签名（只在树变了才重画左栏）
+  treeOpen: null,     // 展开中的组节点 id 集合（写 localStorage primerTreeOpen）
+  viewSig: "",        // 中间面板当前内容的签名（变了才重建）
+  fitKeys: {},        // 已取过景的签名（同一份内容只自动取景一次）
+  view: { canvas: { items: [] } },   // 当前渲染中的画布（看板或多图；单图＝只有一项）
 };
 
 const $ = (s) => document.querySelector(s);
 const el = (tag) => document.createElementNS(NS, tag);
+
+const KIND_LABEL = { board: "画布", image: "图", stl: "3D", group: "" };
+const HINT_2D = "滚轮缩放 · 拖拽平移 · 套索圈选 / 橡皮擦除我的预选区域 · 圈选与文字随下一份提交一同发送";
+const HINT_3D = "左键旋转 · 右键平移 · 滚轮缩放 · 1 单位 = 1 m（Blender 口径）";
 
 /* ---------------------------------------------------------------- utils */
 
@@ -41,7 +49,13 @@ function apiPost(path, body) {
 }
 
 function itemById(canvas, id) {
-  return (canvas.items || []).find((it) => it.id === id);
+  return (canvas && canvas.items || []).find((it) => it.id === id);
+}
+
+/* 当前视图里的项，回退到模型侧画布：单图视图下也要能查到图与覆盖层。 */
+function itemFor(id) {
+  const model = S.data ? S.data.canvas : { items: [] };
+  return itemById(S.view.canvas, id) || itemById(model, id);
 }
 
 function trayCount() {
@@ -52,9 +66,8 @@ function trayCount() {
 
 function traySelections() {
   const out = [];
-  const canvas = S.data ? S.data.canvas : { items: [] };
   for (const [itemId, s] of Object.entries(S.sel)) {
-    const it = itemById(canvas, itemId);
+    const it = itemFor(itemId);
     const image = it ? it.image : itemId;
     for (const l of s.lassos || []) out.push({ image, item: itemId, mode: "lasso", points: l.pts });
     for (const e of s.erases || []) out.push({ image, item: itemId, mode: "erase", points: e.pts });
@@ -270,8 +283,7 @@ function labelFor(ov, item) {
 }
 
 function redrawUser() {
-  const canvas = S.data ? S.data.canvas : { items: [] };
-  for (const it of canvas.items || []) {
+  for (const it of S.view.canvas.items || []) {
     const svg = $("#world svg[data-id='" + CSS.escape(it.id) + "']");
     if (!svg) continue;
     const user = svg.querySelector("g.user");
@@ -388,9 +400,14 @@ function overlayBBox(it, ov) {
 }
 
 function focusOverlay(image, ovId) {
-  const canvas = S.data ? S.data.canvas : { items: [] };
-  const it = (canvas.items || []).find((x) => x.image === image || x.id === image);
+  const model = (S.data && S.data.canvas) || { items: [] };
+  const it = (model.items || []).find((x) => x.image === image || x.id === image);
   if (!it) return;
+  // 覆盖层只存在于模型侧画布：看板之外的视图先切回看板（伪节点），再看图。
+  if (!S.asset || S.asset.kind !== "board") {
+    const node = boardNode();
+    if (node) selectAsset(node); else applyAssetView(false);
+  }
   let box = null;
   for (const ov of it.overlays || []) if (ov.id === ovId) box = overlayBBox(it, ov);
   const L = S.layout[it.id];
@@ -445,6 +462,28 @@ function renderCards() {
     flash(n ? `已提交 ${n} 张卡（圈选请随单卡提交）` : "没有可提交的卡");
   };
   head.appendChild(btnAll);
+  const btnReset = document.createElement("button");
+  btnReset.className = "ghost";
+  btnReset.textContent = "重置问题卡";
+  btnReset.title = "把现有卡片整体退役（归档到 cards_retired.json 并备份），卡片区清空";
+  const note = document.createElement("span");
+  note.className = "note";
+  btnReset.onclick = async () => {
+    const n = cards.length;
+    if (!n) { note.textContent = "卡片区本来就是空的。"; return; }
+    if (!window.confirm(`重置问题卡？现有 ${n} 张卡将整体退役（归档到 cards_retired.json，写前自动备份）。`)) return;
+    const r = await apiPost("/reset-cards", { reason: "人在会话舱重置" });
+    if (r && r.ok) {
+      note.textContent = `已重置 ${r.reset || 0} 张（退役累计 ${r.retired_total || 0} 张）。`;
+      S.choices = {};
+      S.cardText = {};
+      poll();
+    } else {
+      note.textContent = "重置失败：" + ((r && r.error) || "未知错误");
+    }
+  };
+  head.appendChild(btnReset);
+  head.appendChild(note);
   wrap.appendChild(head);
 
   for (const c of cards) {
@@ -798,6 +837,7 @@ function updateUnread() {
   } else {
     badge.classList.add("hidden");
   }
+  labelPanelToggle();
 }
 
 function activateTab(name) {
@@ -833,6 +873,250 @@ async function sendChat() {
   }
 }
 
+/* -------------------------------------------------- 资产树与自适应视图 */
+
+/* 左栏树 → 中间面板：节点 kind 决定视图（board 多图看板／image 单图二维／stl 三维），
+ * 组节点可展开收起（状态写 primerTreeOpen），选中 id 写 primerAssetSelected。 */
+
+function tree() {
+  return (S.data && S.data.assets && S.data.assets.tree) || [];
+}
+
+function findTreeNode(id, nodes) {
+  for (const n of nodes || []) {
+    if (n.id === id) return n;
+    const hit = findTreeNode(id, n.children);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function boardNode() {
+  return findTreeNode("g:board#all", tree()) || null;
+}
+
+function treeOpenSet() {
+  if (S.treeOpen) return S.treeOpen;
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem("primerTreeOpen") || "null"); } catch (e) { saved = null; }
+  S.treeOpen = new Set(Array.isArray(saved) ? saved
+    : ["g:models", "g:board", "g:renders", "g:uploads"]);
+  return S.treeOpen;
+}
+
+function saveTreeOpen() {
+  try { localStorage.setItem("primerTreeOpen", JSON.stringify([...treeOpenSet()])); } catch (e) { /* 忽略 */ }
+}
+
+/* 一组分件（子节点全是 stl）可整体选中＝三维视图一次载入多件、按器配色。 */
+function isModelSet(node) {
+  const kids = (node && node.children) || [];
+  return !!(node && node.kind === "group" && kids.length && kids.every((c) => c.kind === "stl"));
+}
+
+function effKind(node) {
+  if (!node) return "board";
+  if (node.kind === "stl" || node.kind === "image" || node.kind === "board") return node.kind;
+  return isModelSet(node) ? "stl" : "board";
+}
+
+function selectable(node) {
+  if (!node) return false;
+  if (node.kind === "group") return isModelSet(node);
+  return node.kind === "board" || node.kind === "image" || node.kind === "stl";
+}
+
+function treeRow(node, depth, open, selId) {
+  const frag = document.createDocumentFragment();
+  const hasKids = !!(node.children && node.children.length);
+  const row = document.createElement("div");
+  row.className = "trow" + (node.id === selId ? " sel" : "") + (selectable(node) ? "" : " empty");
+  row.style.paddingLeft = (6 + depth * 12) + "px";
+
+  const tgl = document.createElement("span");
+  tgl.className = "tgl";
+  if (node.kind === "group" && hasKids) tgl.textContent = open.has(node.id) ? "▾" : "▸";
+  row.appendChild(tgl);
+
+  const label = document.createElement("span");
+  label.className = "tlabel";
+  label.textContent = node.label || node.id;
+  label.title = node.note || node.rel || node.id;
+  row.appendChild(label);
+
+  const kind = document.createElement("span");
+  kind.className = "tkind";
+  kind.textContent = KIND_LABEL[node.kind] || "";
+  row.appendChild(kind);
+
+  if (node.kind === "group" && hasKids) {
+    tgl.onclick = (e) => {          // 三角只管展开/收起，不改变选中项
+      e.stopPropagation();
+      if (open.has(node.id)) open.delete(node.id); else open.add(node.id);
+      saveTreeOpen();
+      renderTree();
+    };
+  }
+  if (selectable(node)) {
+    row.onclick = () => {
+      if (node.kind === "group" && !open.has(node.id)) {   // 选中一组分件时顺手展开
+        open.add(node.id);
+        saveTreeOpen();
+      }
+      selectAsset(node);
+    };
+  }
+  frag.appendChild(row);
+
+  if (node.note) {
+    const note = document.createElement("div");
+    note.className = "tnote";
+    note.style.paddingLeft = (18 + depth * 12) + "px";
+    note.textContent = node.note;
+    frag.appendChild(note);
+  }
+  if (node.kind === "group" && hasKids && open.has(node.id)) {
+    for (const child of node.children) frag.appendChild(treeRow(child, depth + 1, open, selId));
+  }
+  return frag;
+}
+
+function renderTree() {
+  const wrap = $("#tree");
+  if (!wrap || !S.data) return;
+  wrap.innerHTML = "";
+  const open = treeOpenSet();
+  const selId = S.asset ? S.asset.id : null;
+  openPathTo(selId);                      // 选中项藏在折叠组里时，自动把祖先展开
+  for (const node of tree()) wrap.appendChild(treeRow(node, 0, open, selId));
+}
+
+function openPathTo(id, nodes, open) {
+  if (!id) return false;
+  const set = open || treeOpenSet();
+  for (const node of nodes || tree()) {
+    if (node.id === id) return true;
+    if (node.children && openPathTo(id, node.children, set)) {
+      if (node.kind === "group") set.add(node.id);
+      return true;
+    }
+  }
+  return false;
+}
+
+function selectAsset(node) {
+  if (!node) return;
+  S.asset = node;
+  try { localStorage.setItem("primerAssetSelected", node.id); } catch (e) { /* 忽略 */ }
+  renderTree();
+  applyAssetView(true);
+}
+
+/* 刷新后/换树后把选中项重新落到树上：记忆失效时默认"画布总览（全部投放项）"。 */
+function resolveSelection(treeNodes) {
+  const saved = localStorage.getItem("primerAssetSelected");
+  return (saved && findTreeNode(saved, treeNodes)) || findTreeNode("g:board#all", treeNodes) || null;
+}
+
+function setStageMode(kind) {
+  const is3d = kind === "stl";
+  document.body.classList.toggle("mode-3d", is3d);
+  const show = (sel, on) => { const node = $(sel); if (node) node.classList.toggle("hidden", !on); };
+  show("#tools2d", !is3d);
+  show("#tools3d", is3d);
+  show("#stage", !is3d);
+  show("#stage3d", is3d);
+  const hint = $("#hint");
+  if (hint) hint.textContent = is3d ? HINT_3D : HINT_2D;
+  if (is3d) {
+    const wt = $("#wire-toggle"), gt = $("#grid-toggle");
+    if (wt) wt.checked = localStorage.getItem("primer3dWire") === "1";
+    if (gt) gt.checked = localStorage.getItem("primer3dGrid") !== "0";
+  }
+}
+
+/* 同一份内容只在第一次自动取景；换资产、换内容才重新取景。 */
+function fitOnce(sig) {
+  if (S.fitKeys[sig]) return;
+  S.fitKeys[sig] = true;
+  fitView();
+}
+
+function showBoard(force) {
+  const canvas = (S.data && S.data.canvas) || { items: [] };
+  const sig = "board:" + JSON.stringify(canvas);
+  if (!force && sig === S.viewSig) return;
+  S.viewSig = sig;
+  S.view = { canvas };
+  buildCanvas(canvas);
+  fitOnce(sig);
+}
+
+/* 单图资产＝"只有一项"的看板；缺 w/h（renders／上传页）先探出原图尺寸，避免拉伸变形。 */
+function showImageAsset(node, force) {
+  const build = (w, h) => {
+    const id = node.id.startsWith("c:") ? node.id.slice(2) : node.id;
+    const item = {
+      id, image: node.rel, w, h,
+      title: node.title, caption: node.caption, overlays: node.overlays || [],
+    };
+    const canvas = { items: [item] };
+    const sig = "image:" + JSON.stringify(item);
+    if (!force && sig === S.viewSig) return;
+    S.viewSig = sig;
+    S.view = { canvas };
+    buildCanvas(canvas);
+    fitOnce(sig);
+  };
+  if (!node.rel) {
+    const empty = { items: [] };                      // 无预览页：清空中间面板并说明原因
+    S.viewSig = "image:" + node.id + ":empty";
+    S.view = { canvas: empty };
+    buildCanvas(empty);
+    const hint = $("#hint");
+    if (hint) hint.textContent = node.note || "这条资产没有可显示的页面。";
+    return;
+  }
+  if (node.w && node.h) { build(node.w, node.h); return; }
+  const probe = new Image();
+  probe.onload = () => build(probe.naturalWidth || 900, probe.naturalHeight || 620);
+  probe.onerror = () => build(900, 620);
+  probe.src = "/f/" + node.rel;
+}
+
+function stlFiles(node) {
+  const nodes = node.kind === "group" ? (node.children || []) : [node];
+  return nodes.filter((n) => n.kind === "stl").map((n) => ({
+    url: n.url || ("/model/" + n.rel), label: n.label, craft: n.craft,
+  }));
+}
+
+function enter3dAsset(node, force) {
+  const mod = VIEW3D;
+  const files = stlFiles(node);
+  const sig = "3d:" + files.map((f) => f.url).join("|");
+  if (!mod) return;
+  if (!force && sig === S.viewSig) { mod.resize(); return; }
+  S.viewSig = sig;
+  mod.open({ files, label: node.label });
+  mod.setWireframe(localStorage.getItem("primer3dWire") === "1");
+  mod.setGrid(localStorage.getItem("primer3dGrid") !== "0");
+}
+
+function applyAssetView(force) {
+  const kind = effKind(S.asset);
+  setStageMode(kind === "stl" ? "stl" : "2d");
+  if (kind === "stl") {
+    load3dLib().then(() => enter3dAsset(S.asset, force)).catch((err) => {
+      const note = $("#gl-note");
+      if (note) note.textContent = "三维视图初始化失败：" + err;
+    });
+    return;
+  }
+  if (kind === "image") { showImageAsset(S.asset, force); return; }
+  showBoard(force);
+}
+
 /* -------------------------------------------------------------- 轮询 */
 
 async function poll() {
@@ -843,23 +1127,24 @@ async function poll() {
     $("#status-text").textContent = "已连接";
     $("#session-path").textContent = st.session || "";
     const chat = st.chat || {};
+    const treeSig = JSON.stringify((st.assets && st.assets.tree) || []);
     const h = JSON.stringify([st.canvas, st.cards, st.record, (st.uploads || []).length,
       Object.keys(st.answers || {}).length, Object.values(st.answers || {}).map((a) => a.received_at),
-      (chat.messages || []).length, chat.escalation || false]);
+      (chat.messages || []).length, chat.escalation || false, treeSig]);
     renderChatMeta();
     if (h !== S.hash) {
       S.hash = h;
-      const ch = JSON.stringify(st.canvas);
-      if (ch !== S.canvasHash) {
-        S.canvasHash = ch;
-        buildCanvas(st.canvas);
-        if (!S.fitted) { fitView(); S.fitted = true; }
+      if (treeSig !== S.treeHash) {
+        S.treeHash = treeSig;
+        S.asset = resolveSelection((st.assets && st.assets.tree) || []);
+        renderTree();
       }
       renderCards();
       renderRecord();
       renderUploads();
       renderChat();
       updateTray();
+      applyAssetView(false);
     }
     updateUnread();
   } catch (err) {
@@ -928,7 +1213,236 @@ function bindChatInput() {
   });
 }
 
+/* 可见拖拽手柄：输入区高度（#composer-grip）＋面板宽度（#panel-grip）。
+ * 浏览器原生 textarea resize 手柄太小、实测抓不住，所以改成显式手柄：
+ * 命中区外扩＋pointer capture＋rAF 节流＋拖动期锁光标＋双击复位＋尺寸写 localStorage。 */
+function _bindDragGrip(grip, cls, handlers) {
+  let start = null;
+  let pending = 0;
+  grip.addEventListener("pointerdown", (e) => {
+    start = handlers.begin(e) || {};
+    try { grip.setPointerCapture(e.pointerId); } catch (err) { /* 忽略：无 capture 也能拖 */ }
+    grip.classList.add("dragging");
+    document.body.classList.add(cls);
+    e.preventDefault();
+  });
+  grip.addEventListener("pointermove", (e) => {
+    if (!start) return;
+    const dx = e.clientX - start.x, dy = e.clientY - start.y;
+    if (pending) cancelAnimationFrame(pending);
+    pending = requestAnimationFrame(() => { pending = 0; handlers.move(start, dx, dy); });
+  });
+  const stop = () => {
+    if (!start) return;
+    start = null;
+    if (pending) { cancelAnimationFrame(pending); pending = 0; }
+    grip.classList.remove("dragging");
+    document.body.classList.remove(cls);
+    handlers.end();
+  };
+  grip.addEventListener("pointerup", stop);
+  grip.addEventListener("pointercancel", stop);
+  grip.addEventListener("lostpointercapture", stop);
+  grip.addEventListener("dblclick", () => handlers.reset());
+}
+
+function bindGrips() {
+  bindComposerGrip();
+  bindAssetsGrip();
+  bindPanelGrip();
+  bindPanelToggle();
+}
+
+const PANEL_MIN_W = 220;   // 右侧面板可见最小宽度（再窄＝自动收起；拖回即展开）
+const LEFT_MIN_W = 180;    // 左侧资产树可见最小宽度（同上）
+
+function bindAssetsGrip() {
+  const grip = $("#left-grip"), box = $("#assets");
+  if (!grip || !box) return;
+  const MIN_W = LEFT_MIN_W;
+  const maxW = () => Math.max(240, Math.round(window.innerWidth * 0.5));
+  const apply = (w) => {
+    const v = Math.max(MIN_W, Math.min(maxW(), Math.round(w)));
+    box.style.flexBasis = v + "px";
+    box.style.maxWidth = "none";
+    box.classList.remove("hidden-assets");
+    grip.classList.remove("collapsed");
+    return v;
+  };
+  const collapse = () => {
+    box.classList.add("hidden-assets");
+    grip.classList.add("collapsed");
+    localStorage.setItem("primerLeftHidden", "1");
+  };
+  const saved = Number(localStorage.getItem("primerLeftWidth") || 0);
+  if (saved > 0) apply(saved);
+  if (localStorage.getItem("primerLeftHidden") === "1") collapse();
+  _bindDragGrip(grip, "drag-col", {
+    begin: (e) => ({
+      x: e.clientX, y: e.clientY,
+      w: box.classList.contains("hidden-assets") ? 0 : box.getBoundingClientRect().width,
+    }),
+    move: (st, dx) => {
+      const target = st.w + dx;                 // 左栏向右变宽
+      if (target < MIN_W) {
+        if (!box.classList.contains("hidden-assets")) collapse();
+        return;
+      }
+      localStorage.setItem("primerLeftWidth", String(apply(target)));
+      localStorage.setItem("primerLeftHidden", "0");
+    },
+    end: () => {
+      if (box.classList.contains("hidden-assets")) return;   // 收起态：宽度不动，标志已写
+      const w = Math.round(box.getBoundingClientRect().width);
+      localStorage.setItem("primerLeftWidth", String(w));
+      localStorage.setItem("primerLeftHidden", "0");
+    },
+    reset: () => {
+      box.classList.remove("hidden-assets");
+      grip.classList.remove("collapsed");
+      box.style.flexBasis = "";
+      box.style.maxWidth = "";
+      localStorage.removeItem("primerLeftWidth");
+      localStorage.setItem("primerLeftHidden", "0");
+    },
+  });
+}
+
+function bindComposerGrip() {
+  const grip = $("#composer-grip"), ta = $("#free-text");
+  if (!grip || !ta) return;
+  const clamp = (h) => {
+    const panel = $("#panel");
+    const maxH = Math.max(160, Math.round((panel ? panel.clientHeight : window.innerHeight) * 0.7));
+    return Math.max(44, Math.min(maxH, Math.round(h)));
+  };
+  const store = () => localStorage.setItem(
+    "primerChatInputHeight", String(Math.round(ta.getBoundingClientRect().height)));
+  _bindDragGrip(grip, "drag-row", {
+    begin: (e) => ({ x: e.clientX, y: e.clientY, h: ta.getBoundingClientRect().height }),
+    move: (st, _dx, dy) => { ta.style.height = clamp(st.h - dy) + "px"; },
+    end: store,
+    reset: () => { ta.style.height = ""; localStorage.removeItem("primerChatInputHeight"); },
+  });
+}
+
+function bindPanelGrip() {
+  const grip = $("#panel-grip"), panel = $("#panel");
+  if (!grip || !panel) return;
+  const MIN_W = PANEL_MIN_W;         // 可见最小宽度：再窄就自动收起（拖回来即展开）
+  const maxW = () => Math.max(320, Math.round(window.innerWidth * 0.8));
+  const apply = (w) => {
+    const v = Math.max(MIN_W, Math.min(maxW(), Math.round(w)));
+    panel.style.flexBasis = v + "px";
+    panel.style.maxWidth = "none";
+    panel.classList.remove("hidden-panel");
+    grip.classList.remove("collapsed");
+    return v;
+  };
+  const collapse = () => {
+    panel.classList.add("hidden-panel");
+    grip.classList.add("collapsed");
+    localStorage.setItem("primerPanelHidden", "1");
+    labelPanelToggle();
+  };
+  const saved = Number(localStorage.getItem("primerPanelWidth") || 0);
+  if (saved > 0) apply(saved);
+  _bindDragGrip(grip, "drag-col", {
+    begin: (e) => ({
+      x: e.clientX, y: e.clientY,
+      w: panel.classList.contains("hidden-panel") ? 0 : panel.getBoundingClientRect().width,
+    }),
+    move: (st, dx) => {
+      const target = st.w - dx;
+      if (target < MIN_W) {
+        if (!panel.classList.contains("hidden-panel")) collapse();
+        return;
+      }
+      localStorage.setItem("primerPanelWidth", String(apply(target)));
+      localStorage.setItem("primerPanelHidden", "0");
+    },
+    end: () => {
+      if (panel.classList.contains("hidden-panel")) return;   // 收起态：宽度不动，标志已写
+      const w = Math.round(panel.getBoundingClientRect().width);
+      localStorage.setItem("primerPanelWidth", String(w));
+      localStorage.setItem("primerPanelHidden", "0");
+    },
+    reset: () => {
+      panel.classList.remove("hidden-panel");
+      grip.classList.remove("collapsed");
+      panel.style.flexBasis = "";
+      panel.style.maxWidth = "";
+      localStorage.removeItem("primerPanelWidth");
+      localStorage.setItem("primerPanelHidden", "0");
+      labelPanelToggle();
+    },
+  });
+}
+
+function labelPanelToggle() {
+  const btn = $("#panel-toggle"), panel = $("#panel");
+  if (!btn || !panel) return;
+  if (!panel.classList.contains("hidden-panel")) {
+    btn.textContent = "隐藏面板";
+    return;
+  }
+  const badge = $("#chat-unread");
+  const n = badge && !badge.classList.contains("hidden") ? badge.textContent : "";
+  btn.textContent = n ? `显示面板 (${n})` : "显示面板";
+}
+
+function bindPanelToggle() {
+  const btn = $("#panel-toggle"), panel = $("#panel"), grip = $("#panel-grip");
+  if (!btn || !panel) return;
+  const setHidden = (hidden) => {
+    panel.classList.toggle("hidden-panel", hidden);
+    if (grip) grip.classList.toggle("collapsed", hidden);
+    localStorage.setItem("primerPanelHidden", hidden ? "1" : "0");
+    if (!hidden) {
+      const saved = Number(localStorage.getItem("primerPanelWidth") || 0);
+      if (saved > 0) {
+        const maxW = Math.max(320, Math.round(window.innerWidth * 0.8));
+        const v = Math.max(PANEL_MIN_W, Math.min(maxW, Math.round(saved)));
+        panel.style.flexBasis = v + "px";
+        panel.style.maxWidth = "none";
+      }
+    }
+    labelPanelToggle();
+  };
+  btn.onclick = () => {
+    setHidden(!panel.classList.contains("hidden-panel"));
+    if (typeof fitView === "function") fitView();   // 最大化/恢复画布后按新宽度取景
+  };
+  setHidden(localStorage.getItem("primerPanelHidden") === "1");
+}
+
+/* -------------------------------------------------------------- 三维视图 */
+
+let VIEW3D = null;      // 动态 import 的 viewer3d 模块（只在选中 stl 资产时载入；场景只初始化一次）
+
+async function load3dLib() {
+  if (!VIEW3D) VIEW3D = await import("/static/viewer3d.js");
+  return VIEW3D;
+}
+
+function bindStage3dControls() {
+  const rst = $("#reset-view");
+  if (rst) rst.onclick = () => { if (VIEW3D) VIEW3D.resetView(); };
+  const wt = $("#wire-toggle");
+  if (wt) {
+    wt.checked = localStorage.getItem("primer3dWire") === "1";
+    wt.onchange = () => { if (VIEW3D) VIEW3D.setWireframe(wt.checked); };
+  }
+  const gt = $("#grid-toggle");
+  if (gt) {
+    gt.checked = localStorage.getItem("primer3dGrid") !== "0";
+    gt.onchange = () => { if (VIEW3D) VIEW3D.setGrid(gt.checked); };
+  }
+}
+
 bindUI();
 bindChatInput();
+bindGrips();
+bindStage3dControls();
 poll();
 setInterval(poll, POLL_MS);

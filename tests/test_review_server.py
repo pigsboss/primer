@@ -2,7 +2,8 @@
 """review 会话舱服务测试（``python3 -m primer.review.server``）。
 
 自造会话目录＋线程服务器（127.0.0.1 临时端口），覆盖：状态合并
-（canvas／cards／record／uploads／pages／answers／chat）、作答落盘（覆盖＋追加流水）、
+（canvas／cards／record／uploads／pages／answers／chat）、资产树（assets.tree：模型／画布
+总览／渲染产出／上传四组＋伪节点）、作答落盘（覆盖＋追加流水）、
 对话消息落盘与校验（/state.chat 合并、尾部截断、坏行容错）、上传（图片入页池、PDF
 光栅化与降级、命名消毒、防路径穿越）、错误码与静态页。
 不依赖任何任务侧产物；PDF 真光栅化只在 pdftoppm 存在时执行，否则走降级分支。
@@ -213,6 +214,207 @@ def test_answer_bad_json_and_traversal_name(live):
     assert (session.root / "answers" / "evil.json").is_file()
 
 
+# ------------------------------------------------------------------ 问题卡重置
+
+def test_reset_cards_moves_to_retired(live):
+    session, base = live
+    (session.root / "cards.json").write_text(json.dumps(
+        {"cards": [{"id": "q1", "title": "卡一"}, {"id": "q2", "title": "卡二"}]},
+        ensure_ascii=False), encoding="utf-8")
+    (session.root / "cards_retired.json").write_text(json.dumps(
+        {"cards": [{"id": "old", "title": "旧卡", "retired_at": "前次"}]},
+        ensure_ascii=False), encoding="utf-8")
+
+    status, r = _post_json(base, "/reset-cards", {"reason": "R29 重置"})
+    assert status == 200 and r["ok"]
+    assert r["reset"] == 2 and r["retired_total"] == 3
+
+    live_cards = json.loads((session.root / "cards.json").read_text(encoding="utf-8"))
+    assert live_cards["cards"] == []
+    retired = json.loads((session.root / "cards_retired.json").read_text(encoding="utf-8"))["cards"]
+    assert [c["id"] for c in retired] == ["old", "q1", "q2"]
+    assert all(c.get("retired_reason") == "R29 重置" and c.get("retired_at") for c in retired[1:])
+
+    backups = sorted(p.name for p in (session.root / "_backup").glob("cards*.json"))
+    assert len(backups) == 2, backups
+
+    _, st = _get(base, "/state")
+    assert st["cards"]["cards"] == []
+
+
+def test_reset_cards_empty_is_noop(live):
+    session, base = live
+    status, r = _post_json(base, "/reset-cards", {})
+    assert status == 200 and r["ok"] and r["reset"] == 0
+    backups = list((session.root / "_backup").glob("cards*.json")) if (session.root / "_backup").is_dir() else []
+    assert backups == []
+
+
+def test_static_assets_expose_resize_grips(live):
+    """两个拖拽手柄（面板宽度／输入区高度）、三段版式、资产树与重置按钮的落地检查：资源缺一个就红。"""
+    _, base = live
+    status, html = _get(base, "/static/index.html")
+    assert status == 200 and b'id="panel-grip"' in html and b'id="composer-grip"' in html
+    # 版式：左＝资产树｜中＝可视化｜右＝对话面板，两条竖直分隔条各夹一边
+    assert b'id="assets"' in html and b'id="left-grip"' in html
+    assert (html.index(b'id="assets"') < html.index(b'id="left-grip"')
+            < html.index(b'id="stage-wrap"') < html.index(b'id="panel-grip"')
+            < html.index(b'id="panel"'))
+    # 视图方式改由资产类型决定：旧的"渲染输出／三维交互"页签已删，工具栏按类型分两组
+    assert b'id="viewtabs"' not in html and b'id="mode-render"' not in html and b'id="mode-3d"' not in html
+    assert b'id="tools2d"' in html and b'id="tools3d"' in html and b'id="model-stats"' in html
+    # 版式：对话框（free-text）独占一行，模型选择／状态提示／发送在下一行（freebar-actions）
+    assert html.index(b'id="free-text"') < html.index(b'id="freebar-actions"')
+    assert b'id="chat-model"' in html and b'id="chat-driver"' in html and b'id="free-send"' in html
+    status, css = _get(base, "/static/style.css")
+    assert status == 200 and b"#panel-grip" in css and b"ns-resize" in css and b"col-resize" in css
+    assert b"#freebar-actions" in css and b"#chat-foot" not in css
+    assert b"#panel.hidden-panel" in css and b"body.drag-col" in css
+    assert b"#panel-grip.collapsed" in css
+    assert b"#assets.hidden-assets" in css and b"#left-grip.collapsed" in css and b".trow" in css
+    assert b"chat-foot" not in html
+    assert b'id="panel-toggle"' in html and "隐藏面板".encode("utf-8") in html
+    status, js = _get(base, "/static/app.js")
+    assert status == 200 and b"bindGrips" in js and b'"/reset-cards"' in js
+    assert b"labelPanelToggle" in js and b"hidden-panel" in js
+    assert b"PANEL_MIN_W" in js and b"collapse" in js
+    assert b"LEFT_MIN_W" in js and b"primerLeftWidth" in js and b"primerLeftHidden" in js
+    assert b"primerTreeOpen" in js and b"primerAssetSelected" in js and b"_bindDragGrip" in js
+    assert "重置问题卡".encode("utf-8") in js
+
+
+# ------------------------------------------------------------------ 三维模型资产
+
+def _assets_dir(tmp_path):
+    root = tmp_path / "assets"
+    root.mkdir()
+    (root / "模型_2034.stl").write_bytes(b"solid x\nendsolid x\n")
+    sub = root / "分件"
+    sub.mkdir()
+    (sub / "COL0.stl").write_bytes(b"solid a\nendsolid a\n")
+    (sub / "note.txt").write_text("nope", encoding="utf-8")
+    return root
+
+
+@pytest.fixture()
+def live_assets(tmp_path):
+    session = S.Session(tmp_path / "review", assets=_assets_dir(tmp_path))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), S.make_handler(session, verbose=False))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    base = "http://127.0.0.1:%d" % httpd.server_address[1]
+    yield session, base
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def test_assets_listing_groups_stl_only(live_assets):
+    _, base = live_assets
+    _, st = _get(base, "/state")
+    tree = st["assets"]["tree"]
+    assert tree[0]["id"] == "g:board#all" and tree[0]["kind"] == "board"   # 伪节点在最上
+
+    models = _node(tree, "g:models")
+    assert models["kind"] == "group" and "note" not in models
+    assert [n["id"] for n in models["children"]] == ["m:模型_2034.stl", "g:分件"]
+    root = models["children"][0]
+    assert root["kind"] == "stl" and root["url"] == "/model/模型_2034.stl"
+    assert root["rel"] == "模型_2034.stl" and root["bytes"] > 0
+    assert root["label"].startswith("整机（标准）·") and "craft" not in root
+    parts = models["children"][1]
+    assert parts["label"] == "分件（标准）· 1 件"
+    col0 = parts["children"][0]
+    assert col0["kind"] == "stl" and col0["craft"] == "COL0"
+    assert col0["url"] == "/model/分件/COL0.stl" and col0["rel"] == "分件/COL0.stl"
+    assert "note.txt" not in json.dumps(tree, ensure_ascii=False)          # .txt 不入清单
+
+
+def test_assets_tree_board_renders_uploads(live):
+    session, base = live
+    (session.root / "canvas.json").write_text(json.dumps({"items": [
+        {"id": "i1", "image": "pages/a.png", "w": 10, "h": 10, "title": "题一", "caption": "说明",
+         "overlays": [{"id": "o1", "type": "label", "at": [1, 2], "label": "L"}]},
+        {"id": "i2", "image": "pages/b.png"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    (session.root / "renders" / "shot.png").write_bytes(PNG_1PX)
+    with (session.root / "uploads" / "index.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"name": "paper.pdf", "desc": "论文",
+                             "pages": ["pages/paper-p-1.png", "pages/paper-p-2.png"]},
+                            ensure_ascii=False) + "\n")
+        fh.write(json.dumps({"name": "shot.png", "pages": ["pages/shot.png"]},
+                            ensure_ascii=False) + "\n")
+    _, st = _get(base, "/state")
+    tree = st["assets"]["tree"]
+
+    board = _node(tree, "g:board")
+    assert [c["id"] for c in board["children"]] == ["c:i1", "c:i2"]
+    first = board["children"][0]
+    assert first["kind"] == "image" and first["url"] == "/f/pages/a.png"
+    assert first["rel"] == "pages/a.png" and first["w"] == 10 and first["h"] == 10
+    assert first["title"] == "题一" and first["caption"] == "说明"
+    assert first["overlays"][0]["id"] == "o1"                              # 覆盖层原样透出
+    assert board["children"][1]["label"] == "i2"                           # 无 title 用 id
+
+    renders = _node(tree, "g:renders")
+    assert [c["url"] for c in renders["children"]] == ["/f/renders/shot.png"]
+    assert renders["children"][0]["id"] == "r:shot.png"
+
+    pdf, image = _node(tree, "g:uploads")["children"]
+    assert pdf["kind"] == "group" and pdf["label"] == "paper.pdf（PDF · 2 页）"
+    assert [c["label"] for c in pdf["children"]] == ["第 1 页", "第 2 页"]
+    assert pdf["children"][1]["url"] == "/f/pages/paper-p-2.png"
+    assert pdf["children"][1]["rel"] == "pages/paper-p-2.png"
+    assert image["kind"] == "image" and image["url"] == "/f/pages/shot.png"
+
+
+def _node(nodes, nid):
+    """深度优先找节点（组可以嵌套：分件组／PDF 页组）。"""
+    for n in nodes:
+        if n["id"] == nid:
+            return n
+        hit = _node(n.get("children") or [], nid)
+        if hit:
+            return hit
+    return None
+
+
+def test_model_route_serves_and_guards(live_assets):
+    session, base = live_assets
+    status, body = _get(base, "/model/" + urllib.parse.quote("模型_2034.stl"))
+    assert status == 200 and body.startswith(b"solid x")
+    status, body = _get(base, "/model/" + urllib.parse.quote("分件/COL0.stl"))
+    assert status == 200 and body.startswith(b"solid a")
+    status, _ = _get(base, "/model/note.txt")                          # 后缀白名单
+    assert status == 403
+    status, _ = _get(base, "/model/%2e%2e/secret.stl")                 # 越界（编码绕过）
+    assert status == 403
+    with pytest.raises(S.ReviewError):
+        session.asset_path("../secret.stl")
+
+
+def test_model_route_without_assets(live):
+    _, base = live
+    status, r = _get(base, "/state")
+    assert status == 200 and r["assets"]["dir"] is None
+    tree = r["assets"]["tree"]
+    assert _node(tree, "g:board#all")["kind"] == "board"        # 未配 --assets 树仍在
+    models = _node(tree, "g:models")
+    assert models["kind"] == "group" and models["children"] == [] and models["note"]
+    assert _node(tree, "g:renders")["children"] == []
+    status, _ = _get(base, "/model/anything.stl")
+    assert status == 403
+
+
+def test_static_serves_vendor_subdir(live):
+    _, base = live
+    status, body = _get(base, "/static/vendor/three/README.md")
+    assert status == 200 and b"three.js" in body
+    status, body = _get(base, "/static/vendor/three/three.module.js")
+    assert status == 200 and b"REVISION" in body[:4000]
+    status, _ = _get(base, "/static/%2e%2e/review/server.py")          # 越界（编码绕过）
+    assert status == 403
+
+
 # ------------------------------------------------------------------ 上传
 
 def test_upload_image(live):
@@ -227,6 +429,7 @@ def test_upload_image(live):
     _, st = _get(base, "/state")
     assert "pages/shot.png" in st["pages"]
     assert st["uploads"][0]["pages"] == ["pages/shot.png"]
+    assert _node(st["assets"]["tree"], "g:uploads")["children"][0]["url"] == "/f/pages/shot.png"
 
 
 def test_upload_dedupe_and_name_sanitize(live):
@@ -265,8 +468,9 @@ def test_path_traversal_guarded(live):
     weird = urllib.parse.quote("../../etc/passwd", safe="")
     status, _ = _get(base, "/f/" + weird)
     assert status == 403
+    # /static/ 现在按"解析后仍在 STATIC_DIR 内"守卫（支持 vendor/ 子目录），越界一律 403
     status, _ = _get(base, "/static/" + urllib.parse.quote("../server.py", safe=""))
-    assert status == 404
+    assert status == 403
 
 
 # ------------------------------------------------------------------ 工具

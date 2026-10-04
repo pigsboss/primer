@@ -2,7 +2,9 @@
 """primer-review —— 会话舱本地服务（Phase 0：上传·画布·圈选·台账，＋ LLM 对话面板）。
 
 **定位**：把从参考输入（技术报告页面、概念图、参数表）到参数台账、模型与 manifest
-的决策过程摆进浏览器：人看图、圈注、作答；模型侧出图、提问、落账。服务本身是
+的决策过程摆进浏览器：人看图、圈注、作答；模型侧出图、提问、落账。界面是三栏——
+左＝资产树（模型／画布投放／渲染产出／上传基准），中＝按资产类型自适应的可视化
+（多图看板／单图二维画布／三维视图），右＝对话面板。服务本身是
 **哑文件经纪人**——所有智能在会话两端，页面只是视图。对话面板（``chat.jsonl`` ＋
 ``chat_meta.json``）同样只读写文件：人在这里发消息，``primer.scene.loop`` 那个进程
 把消息交给所配的 LLM 并把回信写回同一个文件。
@@ -16,7 +18,7 @@
       cards.json     问题卡（模型侧写）：cards[]{id,title,text,options[],attach,allow_text}
       record.json    参数台账（模型侧写；页面只读呈现）：rows[]{id,subject,value,status,evidence,highlight}
       answers/       人的提交（服务写）：<card_id>.json 每卡一份＋_log.jsonl 追加流水
-      renders/       模型渲染回放区（Phase 2 用）
+      renders/       模型渲染回放区（资产树的"渲染产出"组）
 
 **覆盖层语法**（canvas.json overlays 元素）::
 
@@ -30,10 +32,13 @@
 
 **端点**::
 
-    GET  /                静态页面        GET  /state   全量状态（含 chat 节点）
+    GET  /                静态页面        GET  /state   全量状态（含 chat 与 assets 资产树）
     GET  /f/<rel>         会话文件        GET  /healthz 健康检查
+    GET  /model/<rel>     模型文件（--assets 目录，白名单后缀；供资产树的三维视图）
+    GET  /static/<rel>    静态资源（含 vendor/ 子目录的 three.js）
     POST /answer          JSON {card_id, choice, text, selections:[{image,mode,points}]}
     POST /chat            JSON {text, model}     追加一条用户消息到 chat.jsonl
+    POST /reset-cards     JSON {reason?}         问题卡整体退役（cards_retired.json）并清空卡片区
     POST /upload?name=&desc=   原始字节流；PDF 自动按页光栅化
 
 **用法**::
@@ -62,7 +67,12 @@ from typing import Any, BinaryIO, Dict, List, Optional, Sequence
 from urllib.parse import parse_qs, unquote, urlparse
 
 SUBDIRS = ("uploads", "pages", "answers", "renders")
+ASSET_SUFFIXES = (".stl", ".glb", ".gltf", ".bin", ".png", ".jpg", ".jpeg")
+MODEL_SUFFIXES = (".stl",)                     # 资产树"模型"组只收 STL（三维视图用 STLLoader）
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+_CRAFT_RE = re.compile(r"^(col[0-3]|cmb)$", re.IGNORECASE)
+MODELS_GROUP_ID = "g:models"
+BOARD_ALL_ID = "g:board#all"
 
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -115,13 +125,16 @@ class Session:
     """The session directory: guards, state merge, answer/upload writes."""
 
     def __init__(self, root: str | os.PathLike, dpi: int = DEFAULT_DPI,
-                 max_pages: int = DEFAULT_MAX_PAGES) -> None:
+                 max_pages: int = DEFAULT_MAX_PAGES,
+                 assets: Optional[str | os.PathLike] = None) -> None:
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         for sub in SUBDIRS:
             (self.root / sub).mkdir(exist_ok=True)
         self.dpi = int(dpi)
         self.max_pages = int(max_pages)
+        # 资产树"模型"组要读的模型目录（任务根：*.stl 整机与分件）。给空＝该组为空并带 note 文案。
+        self.assets_dir = Path(assets).expanduser().resolve() if assets else None
 
     # ------------------------------------------------------------ guards/readers
 
@@ -131,6 +144,167 @@ class Session:
         if p != self.root and self.root not in p.parents:
             raise ReviewError("path escapes session root")
         return p
+
+    def asset_path(self, rel: str) -> Path:
+        """Resolve an asset-relative path (资产树模型）；未配置 assets 或越界/后缀不在白名单时拒绝。"""
+        if self.assets_dir is None:
+            raise ReviewError("assets directory is not configured (--assets)")
+        rel = unquote(rel).lstrip("/")
+        p = (self.assets_dir / rel).resolve()
+        if p != self.assets_dir and self.assets_dir not in p.parents:
+            raise ReviewError("asset path escapes assets root")
+        if p.suffix.lower() not in ASSET_SUFFIXES:
+            raise ReviewError(f"asset suffix not allowed: {p.suffix}")
+        return p
+
+    def assets_state(self) -> Dict[str, Any]:
+        """资产树：模型（--assets 目录）／画布总览（canvas.json）／渲染产出（renders/）／上传（uploads 台账）。
+
+        树是左栏"资产树"的数据源，也是中间面板自适应渲染的依据：节点 ``kind`` 决定视图
+        （``board`` 多图看板、``image`` 单图二维画布、``stl`` 三维视图、``group`` 可折叠容器）。
+        首节点 ``g:board#all`` 是伪节点，选中＝原看板行为。
+        """
+        return {
+            "dir": str(self.assets_dir) if self.assets_dir else None,
+            "tree": [
+                {"id": BOARD_ALL_ID, "label": "画布总览（全部投放项）", "kind": "board"},
+                self._models_node(),
+                self._board_node(),
+                self._renders_node(),
+                self._uploads_node(),
+            ],
+        }
+
+    @staticmethod
+    def _mb(nbytes: int) -> str:
+        return f"{nbytes / 1048576:.1f}"
+
+    @staticmethod
+    def _tier(text: str) -> str:
+        """档位标签：文件名/目录名带 HQ 记号的算"高精度"，其余"标准"（沿用任务侧命名习惯）。"""
+        return "高精度" if "hq" in text.lower() else "标准"
+
+    def _stl_node(self, path: Path, rel: str, label: str) -> Dict[str, Any]:
+        node: Dict[str, Any] = {
+            "id": "m:" + rel,
+            "label": label,
+            "kind": "stl",
+            "url": "/model/" + rel,
+            "rel": rel,
+            "bytes": path.stat().st_size,
+        }
+        craft = _CRAFT_RE.match(path.stem)
+        if craft:                                  # 分件名 COL0–3／CMB：三维视图按器配色
+            node["craft"] = craft.group(1).upper()
+        return node
+
+    def _models_node(self) -> Dict[str, Any]:
+        """模型组：``--assets`` 目录里的 ``*.stl``（depth ≤2）；整机直接挂组下，分件按目录成子组。"""
+        node: Dict[str, Any] = {
+            "id": MODELS_GROUP_ID, "label": "场景 · 模型 · 部件", "kind": "group", "children": [],
+        }
+        if self.assets_dir is None or not self.assets_dir.is_dir():
+            node["note"] = "服务端未配置模型目录（--assets）；三维视图无模型可载。"
+            return node
+        roots: List[Path] = []
+        subdirs: Dict[str, List[Path]] = {}
+        for path in sorted(self.assets_dir.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in MODEL_SUFFIXES:
+                continue
+            rel = path.relative_to(self.assets_dir)
+            if len(rel.parts) == 1:
+                roots.append(path)
+            elif len(rel.parts) == 2:
+                subdirs.setdefault(rel.parts[0], []).append(path)
+        for path in roots:
+            rel = str(path.relative_to(self.assets_dir))
+            node["children"].append(self._stl_node(
+                path, rel, f"整机（{self._tier(path.stem)}）· {self._mb(path.stat().st_size)} MB"))
+        for name in sorted(subdirs):
+            kids = []
+            for path in sorted(subdirs[name]):
+                rel = str(path.relative_to(self.assets_dir))
+                kids.append(self._stl_node(
+                    path, rel, f"{path.stem} · {self._mb(path.stat().st_size)} MB"))
+            node["children"].append({
+                "id": "g:" + name,
+                "label": f"分件（{self._tier(name)}）· {len(kids)} 件",
+                "kind": "group",
+                "children": kids,
+            })
+        if not node["children"]:
+            node["note"] = f"目录里没有 *.stl 模型：{self.assets_dir}"
+        return node
+
+    def _board_node(self) -> Dict[str, Any]:
+        """画布组：canvas.json 的 items 逐项透出（title/caption/overlays 原样，另给会话内相对路径 rel）。"""
+        document = self._read_json(self.root / "canvas.json", {"items": []})
+        children: List[Dict[str, Any]] = []
+        for item in document.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            image = str(item.get("image") or "")
+            item_id = str(item.get("id") or image)
+            node: Dict[str, Any] = {
+                "id": "c:" + item_id,
+                "label": str(item.get("title") or item_id),
+                "kind": "image",
+                "url": "/f/" + image,
+                "rel": image,
+                "overlays": item.get("overlays") or [],
+            }
+            for key in ("w", "h", "title", "caption"):
+                if item.get(key) is not None:
+                    node[key] = item[key]
+            children.append(node)
+        return {"id": "g:board", "label": "画布总览（模型投放）", "kind": "group",
+                "children": children}
+
+    def _renders_node(self) -> Dict[str, Any]:
+        """渲染产出组：会话 ``renders/`` 下的图片（模型侧回放区）。"""
+        children: List[Dict[str, Any]] = []
+        for path in sorted((self.root / "renders").glob("*")):
+            if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            rel = f"renders/{path.name}"
+            children.append({
+                "id": "r:" + path.name, "label": path.name, "kind": "image",
+                "url": "/f/" + rel, "rel": rel, "bytes": path.stat().st_size,
+            })
+        return {"id": "g:renders", "label": "渲染产出（renders/）", "kind": "group",
+                "children": children}
+
+    def _uploads_node(self) -> Dict[str, Any]:
+        """上传组：``uploads/index.jsonl`` 台账逐条成节点；多页（PDF）成子组，逐页一个图片节点。"""
+        children: List[Dict[str, Any]] = []
+        for record in self._read_jsonl(self.root / "uploads" / "index.jsonl"):
+            name = str(record.get("name") or "")
+            if not name:
+                continue
+            pages = [str(p) for p in (record.get("pages") or [])]
+            is_pdf = Path(name).suffix.lower() == ".pdf"
+            if len(pages) > 1 or (is_pdf and pages):
+                label = name + (f"（PDF · {len(pages)} 页）" if is_pdf else f"（{len(pages)} 页）")
+                node: Dict[str, Any] = {
+                    "id": "u:" + name, "label": label, "kind": "group",
+                    "children": [{
+                        "id": f"u:{name}#{i}", "label": f"第 {i} 页", "kind": "image",
+                        "url": "/f/" + page, "rel": page,
+                    } for i, page in enumerate(pages, 1)],
+                }
+            else:
+                rel = pages[0] if pages else ""
+                node = {
+                    "id": "u:" + name, "label": name, "kind": "image",
+                    "url": "/f/" + rel if rel else None, "rel": rel or None,
+                }
+                if record.get("note"):
+                    node["note"] = str(record["note"])
+            if record.get("desc"):
+                node["caption"] = str(record["desc"])
+            children.append(node)
+        return {"id": "g:uploads", "label": "我上传的基准输入", "kind": "group",
+                "children": children}
 
     @staticmethod
     def _read_json(path: Path, default: Any) -> Any:
@@ -182,6 +356,7 @@ class Session:
             "pages": pages,
             "answers": answers,
             "chat": self.chat_state(),
+            "assets": self.assets_state(),
         }
 
     # ------------------------------------------------------------ chat
@@ -246,6 +421,52 @@ class Session:
         with (self.root / "answers" / "_log.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(line, ensure_ascii=False) + "\n")
         return str(target.relative_to(self.root))
+
+    # ------------------------------------------------------------ cards reset
+
+    def reset_cards(self, reason: str = "") -> Dict[str, Any]:
+        """问题卡整体退役：活动卡移入 ``cards_retired.json``，``cards.json`` 清空。
+
+        会话舱"重置问题卡"按钮（人的动作）走这里。两份 JSON 写前都复制进 ``_backup/``，
+        命名沿用驱动侧约定（``<stem>.<时间戳>.<后缀>``），重置可回滚。
+        """
+        ts = _now()
+        path = self.root / "cards.json"
+        document = self._read_json(path, {"cards": []})
+        cards = [c for c in (document.get("cards") or []) if isinstance(c, dict)]
+        retired_path = self.root / "cards_retired.json"
+        retired_doc = self._read_json(retired_path, {"cards": []})
+        retired = [c for c in (retired_doc.get("cards") or []) if isinstance(c, dict)]
+        if not cards:
+            return {"ok": True, "reset": 0, "retired_total": len(retired)}
+        note = (reason or "").strip() or "人在会话舱重置"
+        for card in cards:
+            record = dict(card)
+            record["retired_at"] = ts
+            record["retired_reason"] = note
+            retired.append(record)
+        self._backup("cards.json")
+        self._backup("cards_retired.json")
+        path.write_text(json.dumps({"cards": []}, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8")
+        retired_path.write_text(json.dumps({"cards": retired}, ensure_ascii=False, indent=2) + "\n",
+                                encoding="utf-8")
+        return {"ok": True, "reset": len(cards), "retired_total": len(retired), "reason": note}
+
+    def _backup(self, filename: str) -> Optional[str]:
+        """Copy a session JSON into ``_backup/``（命名与驱动侧一致：``<stem>.<stamp>.json``）。"""
+        source = self.root / filename
+        if not source.is_file():
+            return None
+        backup_dir = self.root / "_backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        destination = backup_dir / f"{source.stem}.{stamp}{source.suffix}"
+        try:
+            shutil.copy2(source, destination)
+        except OSError:
+            return None
+        return destination.name
 
     # ------------------------------------------------------------ uploads
 
@@ -366,13 +587,18 @@ def make_handler(review_session: Session, verbose: bool = False):
                 if url.path in ("/", "/index.html"):
                     self._send_file(STATIC_DIR / "index.html")
                 elif url.path.startswith("/static/"):
-                    name = _safe_name(url.path[len("/static/"):])
-                    self._send_file(STATIC_DIR / name)
+                    rel = unquote(url.path[len("/static/"):]).lstrip("/")
+                    path = (STATIC_DIR / rel).resolve()
+                    if path != STATIC_DIR and STATIC_DIR not in path.parents:
+                        raise ReviewError("static path escapes static root")
+                    self._send_file(path)
                 elif url.path == "/healthz":
                     self._json({"ok": True, "session": str(self.session.root),
                                 "ts": time.time()})
                 elif url.path == "/state":
                     self._json(self.session.state())
+                elif url.path.startswith("/model/"):
+                    self._send_file(self.session.asset_path(url.path[len("/model/"):]))
                 elif url.path.startswith("/f/"):
                     self._send_file(self.session.file_path(url.path[len("/f/"):]))
                 else:
@@ -393,6 +619,10 @@ def make_handler(review_session: Session, verbose: bool = False):
                     payload = self._read_json_body()
                     record = self.session.save_chat(payload)
                     self._json({"ok": True, "chat": record})
+                elif url.path == "/reset-cards":
+                    payload = self._read_json_body()
+                    reason = payload.get("reason") if isinstance(payload, dict) else None
+                    self._json(self.session.reset_cards(str(reason or "")))
                 elif url.path == "/upload":
                     q = {k: v[0] for k, v in parse_qs(url.query).items()}
                     self._receive_upload(q.get("name") or "upload", q.get("desc") or "")
@@ -459,13 +689,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help=f"PDF rasterization DPI (default {DEFAULT_DPI})")
     ap.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES,
                     help=f"max PDF pages to rasterize (default {DEFAULT_MAX_PAGES})")
+    ap.add_argument("--assets", default=None,
+                    help="optional model directory for the asset tree's 3D view "
+                         "(served read-only at /model/<rel>)")
     ap.add_argument("--no-open", action="store_true",
                     help="do not open the browser automatically")
     ap.add_argument("--verbose", action="store_true", help="log requests to stderr")
     args = ap.parse_args(argv)
 
     try:
-        session = Session(args.session, dpi=args.dpi, max_pages=args.max_pages)
+        session = Session(args.session, dpi=args.dpi, max_pages=args.max_pages,
+                          assets=args.assets)
     except ReviewError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 2
