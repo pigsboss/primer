@@ -45,6 +45,7 @@ include = ["primer*"]
 [tool.setuptools.package-data]
 "primer.digest" = ["rules_examples/*.yml"]
 "primer.book" = ["templates/*.tmpl"]
+"primer.literature.web" = ["static/*"]
 "primer.review" = ["static/*"]
 
 [tool.pytest.ini_options]

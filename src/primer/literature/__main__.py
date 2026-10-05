@@ -3,11 +3,16 @@
 
 * ``scan``：发现、取哈希、去重并打印扫描报告；
 * ``status``：读取账本并打印状态摘要；
-* ``run``：调用 MinerU 后端真正转换（分块、失败隔离、断点续跑、后处理）。
+* ``run``：调用 MinerU 后端真正转换（分块、失败隔离、断点续跑、后处理）；
+* ``web``：启动文献库本地服务（WebUI）——库文件默认 ``./primer.literature.json``，
+  端口被占用时回退随机空闲端口（见 :mod:`primer.literature.web.server`）；
+  启动前自动加载 ``.env``（``--env-file`` > ``./.env`` > primer 源码仓库根；
+  只注入未设置的变量，任何值不打印）。
 
-三个子命令都可以在完全不提供配置文件的情况下，仅靠 ``--root`` / ``--project-root``
-跑通。``run --dry-run`` 只打印计划，不写任何文件。工程目录一律只读，产物只会落在
-``<project-root>/_primer/literature/`` 里，报告与账本里的路径都相对工程根书写。
+``scan`` / ``status`` / ``run`` 都可以在完全不提供配置文件的情况下，仅靠 ``--root`` /
+``--project-root`` 跑通。``run --dry-run`` 只打印计划，不写任何文件。工程目录一律只读，
+产物只会落在 ``<project-root>/_primer/literature/`` 里，报告与账本里的路径都相对工程根书写。
+``web`` 与工程目录无关：它只读写用户指定的库文件。
 """
 
 from __future__ import annotations
@@ -143,6 +148,35 @@ def _run_command(args: argparse.Namespace) -> int:
     return 1 if stats.failed else 0
 
 
+def _web_command(args: argparse.Namespace) -> int:
+    """启动文献库本地服务；web 模块延迟导入，不动其它子命令的启动开销。
+
+    启动前加载 ``.env``（``--env-file`` > ``./.env`` > primer 源码仓库根）：
+    只注入尚未设置的变量，报告只含变量名，任何值不打印。
+    """
+    from ..envfile import discover_env_file, load_env_file
+
+    env_file = Path(args.env_file) if args.env_file else None
+    env_path = discover_env_file(env_file)
+    if env_path is not None and not env_path.is_file():
+        print(f"error: env file not found: {env_path}", file=sys.stderr)
+        return 1
+    if env_path is not None:
+        report = load_env_file(env_path)
+        parts = [f"注入 {len(report.injected)} 项"]
+        if report.injected:
+            parts[0] += "：" + "、".join(report.injected)
+        if report.skipped:
+            parts.append(f"已存在跳过 {len(report.skipped)} 项")
+        if report.ignored_lines:
+            parts.append(f"未识别 {len(report.ignored_lines)} 行")
+        print(f"已加载环境变量文件：{env_path}（{'；'.join(parts)}）")
+
+    from .web.server import serve
+
+    return serve(db=args.db, port=args.port, open_browser=not args.no_open)
+
+
 def _catalog_line(catalog: Catalog) -> str:
     """catalog 的一行摘要；扫描时读不动的文件必须点名，不能悄悄少几个。"""
     line = f"{len(catalog.records)} PDFs"
@@ -218,7 +252,8 @@ def build_parser() -> argparse.ArgumentParser:
         f"  {PROG} scan --config literature.yaml --json\n"
         f"  {PROG} run --config literature.yaml --dry-run\n"
         f"  {PROG} run --project-root . --root ./参考资料 --tier standard\n"
-        f"  {PROG} status --project-root .",
+        f"  {PROG} status --project-root .\n"
+        f"  {PROG} web --db ./primer.literature.json",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     commands = parser.add_subparsers(dest="command", required=True)
@@ -270,6 +305,28 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--config", metavar="FILE", help="path to the YAML config")
     status.add_argument("--output-dir", metavar="DIR", help="override the output directory")
     status.set_defaults(handler=_status_command)
+
+    web = commands.add_parser("web", help="serve the local literature library web UI")
+    web.add_argument(
+        "--db",
+        metavar="FILE",
+        help="library JSON file (default: ./primer.literature.json)",
+    )
+    web.add_argument(
+        "--port",
+        type=int,
+        default=8801,
+        metavar="N",
+        help="listen port (default: 8801; a free port is used when it is busy)",
+    )
+    web.add_argument("--no-open", action="store_true", help="do not open the browser automatically")
+    web.add_argument(
+        "--env-file",
+        metavar="FILE",
+        help="load KEY=VALUE pairs from FILE before serving "
+        "(default: ./.env, then the primer checkout's .env)",
+    )
+    web.set_defaults(handler=_web_command)
 
     _add_project_root((scan, run, status))
     return parser

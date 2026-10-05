@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PRIMER · 文献库</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">PRIMER · 文献库</div>
+    <div class="menu-wrap">
+      <button id="btn-file">文件 ▾</button>
+      <div id="file-menu" class="dropdown hidden">
+        <div class="dropdown-item" data-action="open">打开…</div>
+        <div class="dropdown-item" data-action="save">保存</div>
+        <div class="dropdown-item" data-action="save-as">另存为…</div>
+        <div class="dropdown-item" data-action="import">导入…</div>
+        <div class="dropdown-item" data-action="scan-folder">扫描文件夹…</div>
+        <div class="dropdown-item" data-action="add-files">添加本地文件…</div>
+        <div class="dropdown-item" data-action="export">导出…</div>
+      </div>
+    </div>
+    <div class="menu-wrap">
+      <button id="btn-edit">编辑 ▾</button>
+      <div id="edit-menu" class="dropdown hidden">
+        <div class="dropdown-item" data-action="lookup">联网查询（补全／修正字段）</div>
+        <div class="dropdown-item" data-action="ai">AI 解析（补全／修正字段）</div>
+        <div class="dropdown-item" data-action="edit-fields">编辑字段…</div>
+        <div class="dropdown-item" data-action="add-to-project">加入项目…</div>
+        <div class="dropdown-item" data-action="delete">删除选中记录</div>
+        <div class="dropdown-item" data-action="clear">清空库（全部记录）…</div>
+      </div>
+    </div>
+    <div class="menu-wrap">
+      <button id="btn-project">项目 ▾</button>
+      <div id="project-menu" class="dropdown hidden">
+        <div class="dropdown-item" data-action="create">新建…</div>
+        <div class="dropdown-item" data-action="attach-records">加入选中记录</div>
+        <div class="dropdown-item" data-action="move">移动…</div>
+        <div class="dropdown-item" data-action="rename">重命名…</div>
+        <div class="dropdown-item" data-action="delete">删除…</div>
+      </div>
+    </div>
+    <div class="menu-wrap">
+      <button id="btn-display">显示 ▾</button>
+      <div id="display-menu" class="dropdown hidden">
+        <div class="dropdown-item" data-action="sort">排序…</div>
+        <div class="dropdown-item" data-action="filter">筛选…</div>
+        <div class="dropdown-item" data-action="reset">重置（显示全部）</div>
+      </div>
+    </div>
+    <input id="import-file" type="file" accept=".csv,.json,.bib,.bibtex,.md,.markdown" class="hidden">
+    <input id="search" type="search" placeholder="搜索 标题／作者／DOI／项目…" autocomplete="off">
+    <div id="lib-path" class="lib-path"></div>
+    <div class="spacer"></div>
+    <button id="btn-new" disabled>＋ 新建记录</button>
+    <button id="btn-scan" disabled>重扫</button>
+  </header>
+
+  <main id="layout">
+    <aside class="pane" id="tree-pane">
+      <div class="pane-title">项目树</div>
+      <div id="tree" class="tree"></div>
+    </aside>
+    <section class="pane" id="list-pane">
+      <div class="pane-title-row">
+        <div class="tabs">
+          <button id="tab-records" class="tab active">文献</button>
+          <button id="tab-files" class="tab">文件</button>
+        </div>
+        <div class="pane-title" id="list-title">文献清单</div>
+      </div>
+      <div id="list" class="list"></div>
+    </section>
+    <aside class="pane" id="detail-pane">
+      <div class="pane-title">记录详情</div>
+      <div id="detail" class="detail"></div>
+    </aside>
+  </main>
+
+  <footer id="statusbar">
+    <span id="status-text"></span>
+    <span id="message" class="message"></span>
+  </footer>
+
+  <div id="file-dialog" class="modal hidden">
+    <div class="dialog">
+      <h2 id="fd-title">文件</h2>
+      <p id="fd-note" class="hint"></p>
+      <label class="field">文件路径
+        <input id="fd-path" type="text" spellcheck="false" autocomplete="off">
+      </label>
+      <label id="fd-scope-row" class="check-row hidden">
+        <input id="fd-scope" type="checkbox"> 仅导出当前清单（含筛选）
+      </label>
+      <p id="fd-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button id="fd-cancel">取消</button>
+        <button id="fd-ok" class="primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="mapping-dialog" class="modal hidden">
+    <div class="dialog wide">
+      <h2>导入映射</h2>
+      <p id="mg-note" class="hint"></p>
+      <div class="mapping-head">
+        <span>源列</span><span>示例值</span><span>目标字段</span>
+      </div>
+      <div id="mapping-rows" class="mapping-rows"></div>
+      <div class="refine-row">
+        <button id="mg-refine" type="button">AI 重新解析</button>
+        <button id="mg-verify" type="button">联网比对</button>
+        <select id="mg-scope">
+          <option value="low">范围：仅疑似条目</option>
+          <option value="all">范围：全部条目</option>
+        </select>
+        <span id="mg-refine-status" class="hint"></span>
+      </div>
+      <p id="mg-error" class="error"></p>
+      <p class="hint">标题必填；缺少标题的行会被跳过。同一目标字段被多列映射时，非空值后者覆盖前者。</p>
+      <div class="dialog-buttons">
+        <button id="mg-cancel">取消</button>
+        <button id="mg-ok" class="primary">导入</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="project-dialog" class="modal hidden">
+    <div class="dialog">
+      <h2 id="pd-title">项目</h2>
+      <p id="pd-note" class="hint"></p>
+      <label class="field hidden" id="pd-target-row">目标项目
+        <input id="pd-target" type="text" list="pd-target-options" spellcheck="false" autocomplete="off" placeholder="选择或输入项目路径（用 / 分层）">
+        <datalist id="pd-target-options"></datalist>
+      </label>
+      <label class="field" id="pd-parent-row">父项目
+        <select id="pd-parent"></select>
+      </label>
+      <label class="field" id="pd-name-row">名称
+        <input id="pd-name" type="text" spellcheck="false" autocomplete="off">
+      </label>
+      <label id="pd-attach-row" class="check-row hidden">
+        <input id="pd-attach" type="checkbox"> 同时加入当前选中的 <span id="pd-attach-count">0</span> 条记录
+      </label>
+      <p id="pd-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button id="pd-cancel">取消</button>
+        <button id="pd-ok" class="primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="sort-dialog" class="modal hidden">
+    <div class="dialog">
+      <h2>排序</h2>
+      <p class="hint">多级排序：先按第一行，再按第二行……（可添加多行）</p>
+      <div id="sd-rows" class="stack-rows"></div>
+      <button id="sd-add" type="button">＋ 添加排序键</button>
+      <p id="sd-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button id="sd-cancel">取消</button>
+        <button id="sd-ok" class="primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="filter-dialog" class="modal hidden">
+    <div class="dialog">
+      <h2>筛选</h2>
+      <p class="hint">多个条件需同时满足（AND）；值为空的行不生效</p>
+      <div id="fdr-rows" class="stack-rows"></div>
+      <button id="fdr-add" type="button">＋ 添加筛选条件</button>
+      <p id="fdr-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button id="fdr-cancel">取消</button>
+        <button id="fdr-ok" class="primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="link-dialog" class="modal hidden">
+    <div class="dialog wide">
+      <h2 id="ld-title">关联</h2>
+      <p id="ld-note" class="hint"></p>
+      <label class="field" id="ld-nature-row">文件性质
+        <select id="ld-nature"></select>
+      </label>
+      <input id="ld-search" class="link-search" type="search" placeholder="搜索…" autocomplete="off">
+      <div id="ld-options" class="link-options"></div>
+      <p id="ld-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button id="ld-cancel">取消</button>
+        <button id="ld-ok" class="primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="preview-dialog" class="modal hidden">
+    <div class="dialog wide">
+      <h2 id="pv-title">变更预览</h2>
+      <p id="pv-note" class="hint"></p>
+      <div id="pv-body" class="preview-body"></div>
+      <p id="pv-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button id="pv-cancel">取消（不应用）</button>
+        <button id="pv-ok" class="primary">应用</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="setup" class="modal hidden">
+    <div class="dialog">
+      <h2>数据库</h2>
+      <p id="setup-note" class="hint"></p>
+      <label class="field">数据库路径
+        <input id="setup-path" type="text" spellcheck="false" autocomplete="off">
+      </label>
+      <div class="radio-row">
+        <label><input type="radio" name="setup-mode" value="new" checked> 新建空数据库</label>
+        <label><input type="radio" name="setup-mode" value="open"> 打开已有数据库</label>
+      </div>
+      <p id="setup-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button id="setup-cancel">取消</button>
+        <button id="setup-ok" class="primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="editor" class="modal hidden">
+    <div class="dialog wide">
+      <h2 id="editor-title">编辑记录</h2>
+      <div class="form-grid">
+        <label class="field span2" data-field="title">标题 *<input id="ed-title" type="text"></label>
+        <label class="field span2" data-field="authors">作者（每行一位）<textarea id="ed-authors" rows="3"></textarea></label>
+        <label class="field" data-field="year">年份<input id="ed-year" type="text" inputmode="numeric"></label>
+        <label class="field" data-field="type">类型<select id="ed-type"></select></label>
+        <label class="field" data-field="venue">来源（期刊名／文集名／出版社）<input id="ed-venue" type="text"></label>
+        <label class="field" data-field="doi">DOI<input id="ed-doi" type="text" spellcheck="false"></label>
+        <label class="field" data-field="url">链接 URL<input id="ed-url" type="text" spellcheck="false"></label>
+        <label class="field" data-field="volume">卷<input id="ed-volume" type="text"></label>
+        <label class="field" data-field="number">期号／编号<input id="ed-number" type="text"></label>
+        <label class="field" data-field="pages">页码<input id="ed-pages" type="text"></label>
+        <label class="field" data-field="eid">文章号<input id="ed-eid" type="text"></label>
+        <label class="field" data-field="publisher">出版者<input id="ed-publisher" type="text"></label>
+        <label class="field" data-field="location">出版地<input id="ed-location" type="text"></label>
+        <label class="field" data-field="institution">机构（授予单位／报告机构）<input id="ed-institution" type="text"></label>
+        <label class="field" data-field="organization">主办单位<input id="ed-organization" type="text"></label>
+        <label class="field" data-field="series">丛书／系列<input id="ed-series" type="text"></label>
+        <label class="field" data-field="edition">版次<input id="ed-edition" type="text"></label>
+        <label class="field" data-field="isbn">ISBN<input id="ed-isbn" type="text"></label>
+        <label class="field" data-field="issn">ISSN<input id="ed-issn" type="text"></label>
+        <label class="field" data-field="eprint">arXiv 编号<input id="ed-eprint" type="text"></label>
+        <label class="field" data-field="eventtitle">会议名称<input id="ed-eventtitle" type="text"></label>
+        <label class="field" data-field="eventdate">会议日期<input id="ed-eventdate" type="text"></label>
+        <label class="field" data-field="keywords">关键词（分号分隔）<input id="ed-keywords" type="text"></label>
+        <label class="field span2" data-field="editor">编者（每行一位）<textarea id="ed-editor" rows="2"></textarea></label>
+        <label class="field span2" data-field="translator">译者（每行一位）<textarea id="ed-translator" rows="2"></textarea></label>
+        <label class="field span2" data-field="notes">备注<textarea id="ed-notes" rows="2"></textarea></label>
+      </div>
+      <label class="check-row"><input id="ed-show-all" type="checkbox"> 显示全部字段（超出当前类型的字段也可编辑）</label>
+      <p id="ed-hidden-note" class="hint hidden"></p>
+      <div class="files-editor" id="ed-files-block">
+        <div class="files-editor-head">
+          <span>本地文件（每项单独维护性质）</span>
+          <button id="ed-addfile" type="button">＋ 添加文件</button>
+        </div>
+        <div id="ed-files"></div>
+      </div>
+      <p id="ed-bulk-note" class="hint hidden">批量模式：只把你修改过的字段应用到全部选中记录；本地文件不受影响。</p>
+      <p class="hint">项目归属由「项目」菜单维护（新建／移动／重命名／删除）；如需单条挂载调整，直接编辑库 JSON 中该记录的 projects。</p>
+      <p id="ed-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button id="ed-cancel">取消</button>
+        <button id="ed-save" class="primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
