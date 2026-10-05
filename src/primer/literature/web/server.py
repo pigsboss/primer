@@ -154,7 +154,7 @@ class LibraryService:
         *,
         chat_sender: Optional[Callable[[str, str], str]] = None,
         web_lookup: Optional[Callable[[str], list[dict[str, Any]]]] = None,
-        parser: Optional[Callable[[Path, Path], Any]] = None,
+        parser: Optional[Callable[[list[Path], Path], Any]] = None,
         picker: Optional[Callable[[str], Optional[list[str]]]] = None,
     ):
         self.default_path = Path(default_path)
@@ -169,7 +169,8 @@ class LibraryService:
         self._web_lookup = web_lookup
         self._parser = parser
         self._picker = picker
-        self._parse_thread: Optional[threading.Thread] = None
+        self._parse_threads: list[threading.Thread] = []
+        self._retiring: set[int] = set()
         self.load_error = ""
         self._lock = threading.RLock()
 
@@ -180,7 +181,7 @@ class LibraryService:
         *,
         chat_sender: Optional[Callable[[str, str], str]] = None,
         web_lookup: Optional[Callable[[str], list[dict[str, Any]]]] = None,
-        parser: Optional[Callable[[Path, Path], Any]] = None,
+        parser: Optional[Callable[[list[Path], Path], Any]] = None,
         picker: Optional[Callable[[str], Optional[list[str]]]] = None,
     ) -> "LibraryService":
         """按 ``--db`` 或默认路径准备服务；库文件在就加载，不在就等首启页。"""
@@ -791,6 +792,10 @@ class LibraryService:
     #: 扫描/添加时接受的源文件格式。
     SUPPORTED_SUFFIXES = (".pdf", ".png", ".jpg", ".jpeg", ".webp")
 
+    #: 解析队列：并发工作线程数，以及单次 ``mineru-kit`` 调用最多携带的文件数。
+    PARSE_WORKERS = 2
+    PARSE_BATCH_SIZE = 4
+
     def file_records_payload(self) -> dict[str, Any]:
         """本地文件记录全量＋待解析计数（前端轮询用）。"""
         with self._lock:
@@ -1110,87 +1115,147 @@ class LibraryService:
             return {"detached": detached}
 
     def _ensure_parse_worker(self) -> None:
-        """有待解析记录且没有活动工作线程时启动解析队列（幂等）。"""
+        """有待解析记录时补齐解析工作线程（幂等；最多 ``PARSE_WORKERS`` 个在班）。"""
         with self._lock:
             library = self.library
             if library is None:
                 return
-            thread = self._parse_thread
-            if thread is not None and thread.is_alive():
+            self._parse_threads = [thread for thread in self._parse_threads if thread.is_alive()]
+            self._retiring &= {thread.ident for thread in self._parse_threads}
+            active = [
+                thread for thread in self._parse_threads if thread.ident not in self._retiring
+            ]
+            if len(active) >= self.PARSE_WORKERS:
                 return
-            # 进程崩溃遗留的 parsing 视作待重试
-            for record in library.file_records:
-                if record.status == "parsing":
-                    record.status = "pending"
+            # 进程崩溃遗留的 parsing 视作待重试（仅在无在班线程时重置，避免踩到在跑的批次）
+            if not active:
+                for record in library.file_records:
+                    if record.status == "parsing":
+                        record.status = "pending"
             if not any(record.status == "pending" for record in library.file_records):
                 return
-            self._parse_thread = threading.Thread(target=self._parse_worker, daemon=True)
-            thread = self._parse_thread
-        thread.start()
+            threads: list[threading.Thread] = []
+            while len(active) + len(threads) < self.PARSE_WORKERS:
+                thread = threading.Thread(target=self._parse_worker, daemon=True)
+                self._parse_threads.append(thread)
+                threads.append(thread)
+        for thread in threads:
+            thread.start()
 
     def _parse_worker(self) -> None:
-        """后台解析队列：逐条把 pending 记录交给 MinerU，产物解包到 ``parsed/`` 下。"""
+        """后台解析队列（``PARSE_WORKERS`` 路并发）：每轮领一批 pending 交给 MinerU。"""
         while True:
-            with self._lock:
-                library = self.library
-                if library is None:
+            try:
+                claimed = self._claim_batch()
+            except LibraryError:
+                return  # 领取时落盘失败（外部改动等）：本路退场，等下一次 ensure 补人
+            if claimed is None:
+                if self._worker_retire():
                     return
-                record = None
-                for item in library.file_records:
-                    if item.status == "pending":
-                        record = item
-                        break
-                if record is None:
-                    return
+                continue
+            library, batch = claimed
+            self._parse_batch(library, batch)
+
+    def _worker_retire(self) -> bool:
+        """（持锁）无活可干时的退场握手：真退场返回 ``True``，有新活返回 ``False``。
+
+        退场承诺与二次查活放在同一个临界区，关闭"worker 退场瞬间恰好有人登记新文件、
+        而 :meth:`_ensure_parse_worker` 又看到本线程尚活不补人"的竞态：两端谁先谁后，
+        都有一方兜住新文件。
+        """
+        with self._lock:
+            library = self.library
+            if library is None:
+                return True
+            if any(item.status == "pending" for item in library.file_records):
+                return False
+            self._retiring.add(threading.get_ident())
+            return True
+
+    def _claim_batch(self) -> Optional[tuple[Library, list[Any]]]:
+        """（持锁）领取一批待解析记录并置为 parsing；没有可领的返回 ``None``。"""
+        with self._lock:
+            library = self.library
+            if library is None:
+                return None
+            batch = [
+                item for item in library.file_records if item.status == "pending"
+            ][: self.PARSE_BATCH_SIZE]
+            if not batch:
+                return None
+            for record in batch:
                 record.status = "parsing"
                 record.updated_at = now_iso()
-                try:
-                    self._persist(library, invalidate_scan=False)
-                except LibraryError:
-                    return
-            self._parse_one(library, record)
+            self._persist(library, invalidate_scan=False)
+            return library, batch
 
-    def _parse_one(self, library: Library, record: Any) -> None:
-        """解析一条记录（在工作线程里跑，不持锁）；结束落盘一次。"""
-        from ..postprocess import unpack_archive
+    def _parse_batch(self, library: Library, batch: list[Any]) -> None:
+        """处理一批待解析文件（worker 线程里跑，不持锁）。
 
-        source = self._resolve_source(library, record.path)
+        优先**单次批量调用**（省去每份文件的进程与模型加载开销）。mineru-kit
+        批量遇首个错误即中止整批，因此缺产物者**逐文件单独重跑**，保住失败隔离。
+        """
         parsed_root = library.path.parent / "parsed"
-        staging = parsed_root / "_zips"
+        staging = parsed_root / "_zips" / f"w{threading.get_ident()}"
+        entries = [(record, self._resolve_source(library, record.path)) for record in batch]
+        archives: dict[Path, Path] = {}
         error = ""
-        archive: Optional[Path] = None
         try:
             staging.mkdir(parents=True, exist_ok=True)
-            outcome = self._run_parser(source, staging)
+            outcome = self._run_parser([source for _, source in entries], staging)
+            for key, value in (outcome.outputs or {}).items():
+                candidate = Path(value)
+                if candidate.is_file():
+                    archives[Path(key)] = candidate
             if outcome.returncode != 0:
                 error = outcome.error or f"mineru exited with code {outcome.returncode}"
-            else:
-                archive = outcome.outputs.get(source)
-                if archive is None or not Path(archive).is_file():
-                    error = "mineru finished but wrote no archive"
         except Exception as exc:  # 命令缺失、超时等
             error = str(exc)[:300] or type(exc).__name__
-        dest: Optional[Path] = None
-        if not error and archive is not None:
+        for record, source in entries:
+            archive = archives.get(source)
+            if archive is not None:
+                self._finish_one(library, record, source, archive)
+        if len(entries) > 1:
+            for record, source in entries:
+                if source not in archives:
+                    self._parse_batch(library, [record])
+        elif entries and entries[0][1] not in archives:
+            self._fail_one(library, entries[0][0], error or "mineru finished but wrote no archive")
+        try:
+            staging.rmdir()  # 空目录顺手清掉；有残留时忽略
+        except OSError:
+            pass
+
+    def _finish_one(self, library: Library, record: Any, source: Path, archive: Path) -> None:
+        """解包一份产物并落库（worker 线程里跑）；失败记入 ``record.error``。"""
+        from ..postprocess import unpack_archive
+
+        parsed_root = library.path.parent / "parsed"
+        with self._lock:
             dest = self._parsed_dir_for(library, record, parsed_root, source.stem)
-            try:
-                unpack_archive(Path(archive), dest, replace_existing=True)
-                if not (dest / "markdown.md").is_file():
-                    error = "archive has no markdown.md"
-                else:
-                    (dest / "model_output.json").unlink(missing_ok=True)
-            except Exception as exc:
-                error = f"cannot unpack archive: {exc}"[:300]
-        if archive is not None:
-            try:
-                Path(archive).unlink(missing_ok=True)
-            except OSError:
-                pass
+            reserved = not record.md_path
+            if reserved:  # 先占住目录名，避免并发的同主干文件撞目录
+                record.md_path = str((dest / "markdown.md").relative_to(library.path.parent))
+        error = ""
+        try:
+            unpack_archive(archive, dest, replace_existing=True)
+            if not (dest / "markdown.md").is_file():
+                error = "archive has no markdown.md"
+            else:
+                (dest / "model_output.json").unlink(missing_ok=True)
+        except Exception as exc:
+            error = f"cannot unpack archive: {exc}"[:300]
+        try:
+            archive.unlink(missing_ok=True)
+        except OSError:
+            pass
         doi = ""
         eprint = ""
-        if not error and dest is not None:
+        if not error:
             doi, eprint = self._extract_identifiers(dest / "markdown.md")
         with self._lock:
+            if error and reserved:
+                record.md_path = ""
             record.updated_at = now_iso()
             if error:
                 record.status = "failed"
@@ -1198,11 +1263,7 @@ class LibraryService:
             else:
                 record.status = "done"
                 record.error = ""
-                record.md_path = (
-                    str((dest / "markdown.md").relative_to(library.path.parent))
-                    if dest is not None
-                    else ""
-                )
+                record.md_path = str((dest / "markdown.md").relative_to(library.path.parent))
                 record.doi = doi
                 record.eprint = eprint
                 record.dup = {}
@@ -1216,6 +1277,17 @@ class LibraryService:
                         record.nature = nature
                     else:
                         record.dup = dup
+            try:
+                self._persist(library, invalidate_scan=False)
+            except LibraryError:
+                pass
+
+    def _fail_one(self, library: Library, record: Any, error: str) -> None:
+        """把一条记录标为解析失败并落盘（worker 线程里跑）。"""
+        with self._lock:
+            record.updated_at = now_iso()
+            record.status = "failed"
+            record.error = error
             try:
                 self._persist(library, invalidate_scan=False)
             except LibraryError:
@@ -1342,13 +1414,20 @@ class LibraryService:
             counter += 1
         return target
 
-    def _run_parser(self, source: Path, output_dir: Path) -> Any:
-        """调用解析器：注入者优先，否则本机 ``mineru-kit``（档位 standard）。"""
+    def _run_parser(self, sources: list[Path], output_dir: Path) -> Any:
+        """调用解析器：注入者优先，否则本机 ``mineru-kit``（档位 standard）。
+
+        批量调用按文件数放宽时限（每份一份基础时限），避免整批被单份拖死。
+        """
         if self._parser is not None:
-            return self._parser(source, output_dir)
+            return self._parser(list(sources), output_dir)
         from ..backends import MineruBackend
 
-        return MineruBackend().parse([source], output_dir, "standard")
+        backend = MineruBackend()
+        timeout = None
+        if backend.timeout is not None:
+            timeout = backend.timeout * max(1, len(sources))
+        return backend.parse(list(sources), output_dir, "standard", timeout=timeout)
 
     # ------------------------------------------------------------- 扫描
 

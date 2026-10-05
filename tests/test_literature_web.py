@@ -1091,14 +1091,17 @@ def test_files_scan_parse_and_delete(tmp_path):
 
     parsed: list = []
 
-    def fake_parse(source, output_dir):
-        parsed.append(Path(source).name)
-        archive = Path(output_dir) / (Path(source).stem + ".zip")
-        with _zipfile.ZipFile(archive, "w") as handle:
-            handle.writestr("markdown.md", "# parsed\n\n![](images/img1.png)\n")
-            handle.writestr("images/img1.png", b"PNG")
-            handle.writestr("model_output.json", "{}")
-        return ParseOutcome(command=("fake",), returncode=0, outputs={Path(source): archive})
+    def fake_parse(sources, output_dir):
+        outputs = {}
+        for source in sources:
+            parsed.append(Path(source).name)
+            archive = Path(output_dir) / (Path(source).stem + ".zip")
+            with _zipfile.ZipFile(archive, "w") as handle:
+                handle.writestr("markdown.md", "# parsed\n\n![](images/img1.png)\n")
+                handle.writestr("images/img1.png", b"PNG")
+                handle.writestr("model_output.json", "{}")
+            outputs[Path(source)] = archive
+        return ParseOutcome(command=("fake",), returncode=0, outputs=outputs)
 
     service = S.LibraryService.initial(
         str(path), parser=fake_parse, picker=lambda kind: [str(scans)]
@@ -1129,8 +1132,7 @@ def test_files_scan_parse_and_delete(tmp_path):
         assert done["md_path"].startswith("parsed/") and md.is_file()
         assert (md.parent / "images" / "img1.png").is_file()
         assert not (md.parent / "model_output.json").exists()
-        assert not (tmp_path / "parsed" / "_zips" / "a.zip").exists()
-        assert not (tmp_path / "parsed" / "_zips" / "b.zip").exists()
+        assert not list((tmp_path / "parsed" / "_zips").rglob("*.zip"))
 
         _, state = server.request("GET", "/api/state")
         assert len(state["file_records"]) == 2
@@ -1159,7 +1161,7 @@ def test_files_parse_failure_and_retry(tmp_path):
 
     calls = {"count": 0}
 
-    def failing_parse(pdf, output_dir):
+    def failing_parse(sources, output_dir):
         calls["count"] += 1
         return ParseOutcome(command=("fake",), returncode=1, error="boom")
 
@@ -1231,13 +1233,16 @@ def test_files_content_dedup_and_auto_link(tmp_path):
     (scans / "a-copy.pdf").write_bytes(b"SAME-BYTES")
     (scans / "b.pdf").write_bytes(b"OTHER-BYTES")
 
-    def fake_parse(source, output_dir):
-        archive = Path(output_dir) / (Path(source).stem + ".zip")
-        with _zipfile.ZipFile(archive, "w") as handle:
-            handle.writestr(
-                "markdown.md", "# Parsed\n\narXiv:2101.00001\n\nDOI: 10.1234/dup.test\n"
-            )
-        return ParseOutcome(command=("fake",), returncode=0, outputs={Path(source): archive})
+    def fake_parse(sources, output_dir):
+        outputs = {}
+        for source in sources:
+            archive = Path(output_dir) / (Path(source).stem + ".zip")
+            with _zipfile.ZipFile(archive, "w") as handle:
+                handle.writestr(
+                    "markdown.md", "# Parsed\n\narXiv:2101.00001\n\nDOI: 10.1234/dup.test\n"
+                )
+            outputs[Path(source)] = archive
+        return ParseOutcome(command=("fake",), returncode=0, outputs=outputs)
 
     service = S.LibraryService.initial(str(path), parser=fake_parse)
     server = _Server(service)
@@ -1292,12 +1297,15 @@ def test_files_auto_link_arxiv_and_ambiguity(tmp_path):
         "r": "# R\n\nDOI: 10.1234/two.test\n",
     }
 
-    def fake_parse(source, output_dir):
-        stem = Path(source).stem
-        archive = Path(output_dir) / (stem + ".zip")
-        with _zipfile.ZipFile(archive, "w") as handle:
-            handle.writestr("markdown.md", bodies[stem])
-        return ParseOutcome(command=("fake",), returncode=0, outputs={Path(source): archive})
+    def fake_parse(sources, output_dir):
+        outputs = {}
+        for source in sources:
+            stem = Path(source).stem
+            archive = Path(output_dir) / (stem + ".zip")
+            with _zipfile.ZipFile(archive, "w") as handle:
+                handle.writestr("markdown.md", bodies[stem])
+            outputs[Path(source)] = archive
+        return ParseOutcome(command=("fake",), returncode=0, outputs=outputs)
 
     service = S.LibraryService.initial(str(path), parser=fake_parse)
     server = _Server(service)
@@ -1364,11 +1372,14 @@ def test_files_file_candidate_when_no_records(tmp_path):
     (scans / "m.pdf").write_bytes(b"M")
     (scans / "n.pdf").write_bytes(b"N")
 
-    def fake_parse(source, output_dir):
-        archive = Path(output_dir) / (Path(source).stem + ".zip")
-        with _zipfile.ZipFile(archive, "w") as handle:
-            handle.writestr("markdown.md", "# Same\n\nDOI: 10.1234/only-files.test\n")
-        return ParseOutcome(command=("fake",), returncode=0, outputs={Path(source): archive})
+    def fake_parse(sources, output_dir):
+        outputs = {}
+        for source in sources:
+            archive = Path(output_dir) / (Path(source).stem + ".zip")
+            with _zipfile.ZipFile(archive, "w") as handle:
+                handle.writestr("markdown.md", "# Same\n\nDOI: 10.1234/only-files.test\n")
+            outputs[Path(source)] = archive
+        return ParseOutcome(command=("fake",), returncode=0, outputs=outputs)
 
     service = S.LibraryService.initial(str(path), parser=fake_parse)
     server = _Server(service)
@@ -1396,7 +1407,7 @@ def test_link_endpoints_attach_detach(tmp_path):
     source = tmp_path / "x.pdf"
     source.write_bytes(b"%PDF-1.4 fake")
 
-    def failing_parse(pdf, output_dir):
+    def failing_parse(sources, output_dir):
         return ParseOutcome(command=("fake",), returncode=1, error="skip")
 
     service = S.LibraryService.initial(str(path), parser=failing_parse)
@@ -1477,11 +1488,14 @@ def test_link_cascade_bulk_clear_and_dup_prune(tmp_path):
     source = tmp_path / "r.pdf"
     source.write_bytes(b"AMBIGUOUS")
 
-    def fake_parse(pdf, output_dir):
-        archive = Path(output_dir) / (Path(pdf).stem + ".zip")
-        with _zipfile.ZipFile(archive, "w") as handle:
-            handle.writestr("markdown.md", "# R\n\nDOI: 10.1234/two.test\n")
-        return ParseOutcome(command=("fake",), returncode=0, outputs={Path(pdf): archive})
+    def fake_parse(sources, output_dir):
+        outputs = {}
+        for source in sources:
+            archive = Path(output_dir) / (Path(source).stem + ".zip")
+            with _zipfile.ZipFile(archive, "w") as handle:
+                handle.writestr("markdown.md", "# R\n\nDOI: 10.1234/two.test\n")
+            outputs[Path(source)] = archive
+        return ParseOutcome(command=("fake",), returncode=0, outputs=outputs)
 
     service = S.LibraryService.initial(str(path), parser=fake_parse)
     server = _Server(service)
@@ -1562,4 +1576,211 @@ def test_import_records_remaps_file_links(tmp_path):
         assert titles[files["f1"]["record_uuid"]] == "源文献甲"
         assert files["f2"]["record_uuid"] == "r2"
     finally:
+        server.close()
+
+
+def test_parse_batch_covers_pending_files_in_one_call(tmp_path):
+    import zipfile as _zipfile
+
+    from primer.literature.backends import ParseOutcome
+
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    sources = []
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        item = tmp_path / name
+        item.write_bytes(("PDF-" + name).encode())
+        sources.append(item)
+
+    calls: list = []
+
+    def fake_parse(items, output_dir):
+        calls.append([Path(item).name for item in items])
+        outputs = {}
+        for item in items:
+            archive = Path(output_dir) / (Path(item).stem + ".zip")
+            with _zipfile.ZipFile(archive, "w") as handle:
+                handle.writestr("markdown.md", "# " + Path(item).stem + "\n")
+            outputs[Path(item)] = archive
+        return ParseOutcome(command=("fake",), returncode=0, outputs=outputs)
+
+    service = S.LibraryService.initial(str(path), parser=fake_parse)
+    server = _Server(service)
+    try:
+        status, data = server.request(
+            "POST", "/api/files/add", {"paths": [str(item) for item in sources]}
+        )
+        assert status == 200 and data["added"] == 3
+        listing = _wait_parsing(server)
+        assert sorted(item["status"] for item in listing["files"]) == ["done", "done", "done"]
+        # 不超过 PARSE_BATCH_SIZE 时整批一次调用（不再每份起一次）
+        assert calls == [["a.pdf", "b.pdf", "c.pdf"]]
+        assert all(item["md_path"].startswith("parsed/") for item in listing["files"])
+        assert not list((tmp_path / "parsed" / "_zips").rglob("*.zip"))
+    finally:
+        server.close()
+
+
+def test_parse_batch_failure_falls_back_per_file(tmp_path):
+    import zipfile as _zipfile
+
+    from primer.literature.backends import ParseOutcome
+
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    sources = []
+    for name in ("a.pdf", "bad.pdf", "c.pdf"):
+        item = tmp_path / name
+        item.write_bytes(("PDF-" + name).encode())
+        sources.append(item)
+
+    calls: list = []
+
+    def flaky_parse(items, output_dir):
+        calls.append([Path(item).name for item in items])
+        outputs = {}
+        for item in items:
+            if Path(item).name == "bad.pdf":
+                # mineru-kit 批量语义：首个失败即中止整批，已产出的归档仍然有效
+                return ParseOutcome(
+                    command=("fake",),
+                    returncode=1,
+                    error="Failed to parse bad.pdf: boom",
+                    outputs=outputs,
+                )
+            archive = Path(output_dir) / (Path(item).stem + ".zip")
+            with _zipfile.ZipFile(archive, "w") as handle:
+                handle.writestr("markdown.md", "# " + Path(item).stem + "\n")
+            outputs[Path(item)] = archive
+        return ParseOutcome(command=("fake",), returncode=0, outputs=outputs)
+
+    service = S.LibraryService.initial(str(path), parser=flaky_parse)
+    server = _Server(service)
+    try:
+        server.request("POST", "/api/files/add", {"paths": [str(item) for item in sources]})
+        listing = _wait_parsing(server)
+        by_name = {item["name"]: item for item in listing["files"]}
+        assert by_name["a.pdf"]["status"] == "done"
+        assert by_name["c.pdf"]["status"] == "done"
+        assert by_name["bad.pdf"]["status"] == "failed"
+        assert "bad.pdf" in by_name["bad.pdf"]["error"]
+        # 先整批一次；缺产物者逐文件重跑（已有产物的 a.pdf 不重跑）
+        assert calls[0] == ["a.pdf", "bad.pdf", "c.pdf"]
+        assert calls[1:] == [["bad.pdf"], ["c.pdf"]]
+    finally:
+        server.close()
+
+
+def test_parse_workers_run_in_parallel(tmp_path):
+    import threading
+    import zipfile as _zipfile
+
+    from primer.literature.backends import ParseOutcome
+
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    sources = []
+    for name in ("a.pdf", "b.pdf"):
+        item = tmp_path / name
+        item.write_bytes(("PDF-" + name).encode())
+        sources.append(item)
+
+    barrier = threading.Barrier(2, timeout=10)
+
+    def parallel_parse(items, output_dir):
+        barrier.wait()  # 两路 worker 必须同时在跑，否则超时失败
+        outputs = {}
+        for item in items:
+            archive = Path(output_dir) / (Path(item).stem + ".zip")
+            with _zipfile.ZipFile(archive, "w") as handle:
+                handle.writestr("markdown.md", "# " + Path(item).stem + "\n")
+            outputs[Path(item)] = archive
+        return ParseOutcome(command=("fake",), returncode=0, outputs=outputs)
+
+    service = S.LibraryService.initial(str(path), parser=parallel_parse)
+    service.PARSE_BATCH_SIZE = 1  # 逼两路并发各领一份
+    server = _Server(service)
+    try:
+        server.request("POST", "/api/files/add", {"paths": [str(item) for item in sources]})
+        listing = _wait_parsing(server)
+        assert sorted(item["status"] for item in listing["files"]) == ["done", "done"]
+    finally:
+        server.close()
+
+
+def test_worker_retire_handshake_marks_and_rechecks(tmp_path):
+    import threading
+
+    from primer.literature.library import FileRecord
+
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    service = S.LibraryService.initial(str(path))
+
+    # 无活可干：承诺退场，并把本线程记入 _retiring（ensure 不再把它当在班）
+    assert service._worker_retire() is True
+    assert threading.get_ident() in service._retiring
+
+    # 有新活：握手上拒绝退场（新登记的文件优先由本线程接着领）
+    service.library.file_records.append(
+        FileRecord(uuid="f1", path=str(tmp_path / "a.pdf"), name="a.pdf")
+    )
+    assert service._worker_retire() is False
+
+
+def test_retiring_worker_gives_way_to_new_file(tmp_path):
+    import zipfile as _zipfile
+
+    from primer.literature.backends import ParseOutcome
+
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    (tmp_path / "a.pdf").write_bytes(b"PDF-A")
+    (tmp_path / "b.pdf").write_bytes(b"PDF-B")
+
+    calls: list = []
+
+    def fake_parse(items, output_dir):
+        calls.append([Path(item).name for item in items])
+        outputs = {}
+        for item in items:
+            archive = Path(output_dir) / (Path(item).stem + ".zip")
+            with _zipfile.ZipFile(archive, "w") as handle:
+                handle.writestr("markdown.md", "# " + Path(item).stem + "\n")
+            outputs[Path(item)] = archive
+        return ParseOutcome(command=("fake",), returncode=0, outputs=outputs)
+
+    service = S.LibraryService.initial(str(path), parser=fake_parse)
+    service.PARSE_WORKERS = 1  # 单路，竞态窗口才可控
+    server = _Server(service)
+    entered = threading.Event()
+    release = threading.Event()
+    original = service._worker_retire
+    held: list = []
+
+    def held_retire():
+        if not original():
+            return False
+        if not held:  # 只把第一路卡在"已承诺退场、尚未死"的窗口里
+            held.append(True)
+            entered.set()
+            release.wait(10)
+        return True
+
+    service._worker_retire = held_retire
+    try:
+        server.request("POST", "/api/files/add", {"paths": [str(tmp_path / "a.pdf")]})
+        assert entered.wait(10), "worker 没有走到退场握手"
+        # 就在退场窗口里登记新文件：ensure 不得把退场中的线程当在班，应另起一路接管
+        status, data = server.request(
+            "POST", "/api/files/add", {"paths": [str(tmp_path / "b.pdf")]}
+        )
+        assert status == 200 and data["added"] == 1
+        listing = _wait_parsing(server)
+        by_name = {item["name"]: item for item in listing["files"]}
+        assert by_name["a.pdf"]["status"] == "done"
+        assert by_name["b.pdf"]["status"] == "done"
+        assert sorted(name for batch in calls for name in batch) == ["a.pdf", "b.pdf"]
+    finally:
+        release.set()
         server.close()
