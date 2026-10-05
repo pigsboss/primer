@@ -501,21 +501,30 @@ function renderCards() {
       div.appendChild(p);
     }
 
-    if (c.attach && c.attach.image) {
+    // 看图按钮只在"引用是会话内相对路径"时给：裸文件名（如 side.png）点不出图，宁可不显示
+    const attachRef = c.attach && typeof c.attach.image === "string" ? c.attach.image.trim() : "";
+    if (attachRef && attachRef.includes("/")) {
       const b = document.createElement("button");
       b.className = "ghost";
       b.textContent = "看图";
-      b.onclick = () => focusOverlay(c.attach.image, c.attach.overlay);
+      b.onclick = () => focusOverlay(attachRef, c.attach.overlay);
       div.appendChild(b);
     }
 
     const opts = document.createElement("div");
     opts.className = "opts";
-    for (const o of c.options || []) {
+    let optIndex = 0;
+    for (const raw of c.options || []) {
+      // 容错：模型偶尔把选项写成字符串（"A 按提案落地"）——这里现拆 key/label，不渲染空白按钮
+      const o = typeof raw === "string"
+        ? { key: (raw.trim().match(/^[A-Za-z0-9]/) || [String(++optIndex)])[0].toUpperCase(),
+            label: raw.trim().replace(/^[A-Za-z0-9]\s*[.、:：)）]?\s*/, "") }
+        : raw;
+      if (!o || (!o.key && !o.label)) continue;
       const b = document.createElement("button");
       b.className = "opt" + (S.choices[c.id] === o.key ? " active" : "");
       const k = document.createElement("span");
-      k.className = "k"; k.textContent = o.key;
+      k.className = "k"; k.textContent = o.key || "";
       b.appendChild(k);
       b.appendChild(document.createTextNode(o.label || ""));
       if (o.desc) {

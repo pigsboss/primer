@@ -75,11 +75,11 @@ class FakeTransport:
         return [json.loads(request.body.decode("utf-8")) for request in self.requests]
 
 
-def llm_reply(text, model="demo-model", usage=None) -> bytes:
+def llm_reply(text, model="demo-model", usage=None, finish="stop") -> bytes:
     payload = {
         "model": model,
         "choices": [
-            {"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}
+            {"message": {"role": "assistant", "content": text}, "finish_reason": finish}
         ],
         "usage": usage
         if usage is not None
@@ -404,6 +404,105 @@ def test_run_reports_a_nonzero_exit_code(tree):
     assert "nope" in result["error"]
 
 
+def test_action_receipt_is_written_back_to_the_chat(tree):
+    """动作回执：run 的结局（exit code＋stdout 末尾）必须落成一条 system 消息，
+    否则模型下一轮看不到自己命令的结果（闭环演示里撞过：台账行被一拖再拖）。"""
+    project, task, session = tree
+    reply = llm_reply("跑构建。\n\n```actions\nactions:\n  - kind: run\n    name: build\n```")
+    driver = make_driver(tree, FakeTransport([reply]))
+    send_user(session, "重建")
+    driver.run_once()
+    system = [r for r in read_chat(session) if r.get("role") == "system"]
+    receipts = [r["text"] for r in system if "动作回执" in r.get("text", "")]
+    assert receipts, system
+    assert "run build：exit 0" in receipts[-1] and "built ok" in receipts[-1]
+
+
+def test_action_receipt_marks_a_failing_run(tree):
+    project, task, session = tree
+    reply = llm_reply("```actions\nactions:\n  - kind: run\n    name: boom\n```")
+    driver = make_driver(tree, FakeTransport([reply]))
+    send_user(session, "跑失败的那个")
+    driver.run_once()
+    receipts = [r["text"] for r in read_chat(session)
+                if r.get("role") == "system" and "动作回执" in r.get("text", "")]
+    assert receipts and "run boom：失败" in receipts[-1]
+
+
+def test_action_receipt_helper_shapes():
+    text = L._action_receipt([
+        {"kind": "run", "name": "verify", "ok": True, "seconds": 5.5,
+         "stdout_tail": ["[verify] 23/23 PASS"]},
+        {"kind": "edit_params", "applied": [1, 2], "failed": []},
+        {"kind": "session_update", "added": 6, "replaced": 0},
+    ])
+    assert text.startswith("动作回执：")
+    assert "run verify：exit 0（5.5s）" in text and "23/23 PASS" in text
+    assert "edit_params：应用 2 条、失败 0 条" in text
+    assert "session_update：新增 6、替换 0" in text
+    assert L._action_receipt([]) == ""
+
+
+def test_parse_actions_accepts_an_unterminated_fence():
+    """模型被 max_tokens 截断时只有开栅栏、没有闭栅栏——动作块不能因此整段丢掉。"""
+    body, actions, notes = L.parse_actions(
+        "正文。\n\n```actions\nactions:\n  - kind: run\n    name: build\n"
+    )
+    assert [a.get("name") for a in actions] == ["build"]
+    assert notes and "未闭合" in notes[0] and body == "正文。"
+    # 闭合围栏照旧
+    assert len(L.parse_actions("x\n```actions\nactions:\n  - kind: run\n    name: build\n```")[1]) == 1
+    # 未闭合但内容不是动作表：不执行、但要留一笔
+    _, acts, notes2 = L.parse_actions("正文。\n\n```actions\n这不是动作表：\n  - 随便\n")
+    assert acts == [] and notes2 and "未闭合" in notes2[0]
+
+
+def test_card_options_and_attach_are_normalized(tree):
+    """卡片口径归一（提交方 2026-10-05 报告的两个坑）：字符串选项→{key,label}；
+    裸文件名 attach→会话内相对路径（找不到就丢掉，宁可不显示"看图"）。"""
+    project, task, session = tree
+    write_png(session / "renders" / "side.png")
+    reply = llm_reply(
+        "开卡。\n\n```actions\nactions:\n  - kind: session_update\n"
+        "    cards:\n      - id: c9\n        title: '9. 取值'\n"
+        "        options: ['A 落地', 'B 改数']\n"
+        "        attach: {image: side.png}\n```"
+    )
+    driver = make_driver(tree, FakeTransport([reply]))
+    send_user(session, "开卡")
+    driver.run_once()
+    cards = json.loads((session / "cards.json").read_text(encoding="utf-8"))["cards"]
+    card = [c for c in cards if c["id"] == "c9"][0]
+    assert [o["key"] for o in card["options"]] == ["A", "B"]
+    assert card["options"][0]["label"] == "落地"
+    assert card["attach"]["image"] == "renders/side.png"
+
+
+def test_card_attach_is_dropped_when_unresolvable(tree):
+    project, task, session = tree
+    reply = llm_reply(
+        "开卡。\n\n```actions\nactions:\n  - kind: session_update\n"
+        "    cards:\n      - id: c10\n        title: '10. 无图'\n"
+        "        attach: {image: 不存在.png}\n```"
+    )
+    driver = make_driver(tree, FakeTransport([reply]))
+    send_user(session, "开卡")
+    driver.run_once()
+    cards = json.loads((session / "cards.json").read_text(encoding="utf-8"))["cards"]
+    card = [c for c in cards if c["id"] == "c10"][0]
+    assert "attach" not in card and card["options"] == []
+
+
+def test_truncated_reply_is_flagged_in_chat(tree):
+    project, task, session = tree
+    reply = llm_reply("正文写一半就断了", finish="length")
+    driver = make_driver(tree, FakeTransport([reply]))
+    send_user(session, "随便问问")
+    driver.run_once()
+    text = agents(session)[-1]["text"]
+    assert "max_tokens 截断" in text
+
+
 def test_run_attaches_new_images_to_the_reply(tree):
     project, task, session = tree
     picture = write_png(task / "out" / "pic.png")
@@ -682,6 +781,40 @@ def test_loop_config_validation_reports_missing_fields(tmp_path):
     assert "params_file" in str(caught.value)
 
 
+def test_loop_config_images_glob_accepts_a_list(tmp_path):
+    """images.glob 允许一组模式；坏类型报错；collect_images 取并集并按 mtime 截断。"""
+    loop = tmp_path / "loop.yaml"
+    loop.write_text(
+        "task: x\nparams_file: params.yaml\neditable: [params.yaml]\n"
+        "commands:\n  build: [python3, -c, 'print(1)']\n"
+        'images: {glob: ["out/*.png", "out/sub/*.png"], max: 3}\n',
+        encoding="utf-8",
+    )
+    config = L.load_loop_config(loop)
+    assert config.images_glob == ("out/*.png", "out/sub/*.png") and config.images_max == 3
+
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        "task: x\nparams_file: params.yaml\neditable: [params.yaml]\n"
+        "commands:\n  build: [python3, -c, 'print(1)']\n"
+        "images: {glob: [1, 2], max: 3}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(L.LoopError) as caught:
+        L.load_loop_config(bad)
+    assert "images.glob" in str(caught.value)
+
+    task = tmp_path / "task"
+    (task / "out" / "sub").mkdir(parents=True)
+    write_png(task / "out" / "a.png")
+    write_png(task / "out" / "sub" / "b.png")
+    write_png(task / "out" / "sub" / "c.png")
+    got = L.collect_images(task, ["out/*.png", "out/sub/*.png"], 10)
+    assert {p.name for p in got} == {"a.png", "b.png", "c.png"}
+    assert len(L.collect_images(task, ["out/*.png", "out/sub/*.png"], 2)) == 2
+    assert L.collect_images(task, "out/*.png", 10)[0].name == "a.png"
+
+
 # ---------------------------------------------------------------- 引用附图
 
 def test_referenced_card_image_is_attached_first(tree):
@@ -881,3 +1014,35 @@ def test_length_budget_exhaustion_gets_an_actionable_hint(tree):
     agent = agents(session)[-1]
     assert "输出预算被推理链吃光" in agent["text"]
     assert "max_tokens" in agent["text"]
+
+
+def test_first_run_seeds_existing_answers_without_turns(tree):
+    """功能上线首跑：已存在的作答登记为已消化，不集中补触发（防"旧作答风暴"）。"""
+    project, task, session = tree
+    (session / "answers").mkdir(exist_ok=True)
+    (session / "answers" / "c6.json").write_text(json.dumps({
+        "card_id": "c6", "choice": "A", "received_at": "2026-10-05T09:00:00+08:00"},
+        ensure_ascii=False), encoding="utf-8")
+    driver = make_driver(tree, FakeTransport([]))
+    assert driver.run_once() == 0
+    state = json.loads((session / L.STATE_FILENAME).read_text(encoding="utf-8"))
+    assert state["seen_answers"]["c6"] == "2026-10-05T09:00:00+08:00"
+
+
+def test_new_card_answer_wakes_the_driver(tree):
+    """点『提交本卡』后只有 answers/<card>.json——驱动要自己补一条 user 消息并处理（提交方两次实测）。"""
+    project, task, session = tree
+    (session / "answers").mkdir(exist_ok=True)
+    driver = make_driver(tree, FakeTransport([llm_reply("收到卡片作答。")]))
+    driver.run_once()                                   # 首跑：只登记水位
+    (session / "answers" / "c7.json").write_text(json.dumps({
+        "card_id": "c7", "choice": "A", "text": "沉入量可以，但要铣槽",
+        "received_at": "2026-10-05T11:03:40+08:00"}, ensure_ascii=False), encoding="utf-8")
+    assert driver.run_once() == 1
+    users = [r for r in read_chat(session) if r.get("role") == "user"]
+    assert "【卡片作答】c7" in users[-1]["text"]
+    assert "choice=A" in users[-1]["text"] and "铣槽" in users[-1]["text"]
+    assert driver.run_once() == 0                       # 幂等
+
+    systems = [r for r in read_chat(session) if r.get("role") == "system"]
+    assert any("已受理" in r.get("text", "") for r in systems)

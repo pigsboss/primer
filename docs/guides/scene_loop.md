@@ -68,7 +68,9 @@ commands:                              # run 动作的白名单；cwd＝任务�
   build:  [python3, array2034.py]
   verify: [/Applications/Blender.app/Contents/MacOS/Blender, --background, --python, verify_array2034.py]
   render: [/Applications/Blender.app/Contents/MacOS/Blender, --background, --python, fig3match2034.py]
-images: {glob: "out/still/match/*_match.png", max: 2}   # 可选：附进上下文／回信附件的图
+images: {glob: ["out/still/*.png", "out/still/match/*_match.png"], max: 6}
+                                       # 可选：附进上下文／回信附件的图；glob 可给一个模式或一组模式
+                                       # （多模式取并集、按 mtime 从新到旧截断到 max）
 system_extra: |                        # 可选：追加在纪律模板后面的任务补充说明
   任务背景：……
 ```

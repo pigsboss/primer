@@ -292,7 +292,8 @@ def test_observatory_adapter_renders_two_colour_silhouettes(tmp_path):
     job = tmp_path / "jobs.json"
     shots = [{"az": 90.0, "el": 0.0, "roll": 0.0, "out": str(tmp_path / "a.png")},
              {"az": 90.0, "el": 0.0, "roll": 30.0, "out": str(tmp_path / "b.png")}]
-    job.write_text(json.dumps({"res": [240, 240], "shots": shots}), encoding="utf-8")
+    # 480 px：细杆/销轴这类微小特征在 240 px 上锯齿严重，滚转等价性残差被放大
+    job.write_text(json.dumps({"res": [480, 480], "shots": shots}), encoding="utf-8")
     cmd = [BLENDER, "-noaudio", "--background", "--python", ADAPTER, "--",
            "--task-root", TASK_ROOT, "--jobs", str(job), "--outdir", str(tmp_path)]
     proc = subprocess.run(cmd, capture_output=True, timeout=600)
@@ -310,7 +311,7 @@ def test_observatory_adapter_renders_two_colour_silhouettes(tmp_path):
     turned = P.outline_of(np.asarray(Image.open(shots[1]["out"]).convert("L")) > 127)
     approx = P.rotate_mask(P.pad_for_rotation(base), -30.0)
     # 正交投影下"相机滚转 θ"与"对图像做 −θ 2D 旋转"理论上等价，残差只来自重采样与
-    # 细杆在低分辨率下的连通性；240 px 小图上实测 ≈0.66，480 px 上更高（验收里给实测值）
+    # 细杆在低分辨率下的连通性；480 px 上实测见验收值（R37 后场景特征更细，故取 480 px）
     assert P.iou(P.normalize_mask(approx, 256)[0], P.normalize_mask(turned, 256)[0]) > 0.6
 
 

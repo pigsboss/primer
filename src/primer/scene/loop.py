@@ -99,6 +99,7 @@ CHAT_CONTEXT_MESSAGES = 40
 CHAT_TEXT_LIMIT = 1500
 ANSWERS_TEXT_LIMIT = 2000
 STDIO_TAIL_LINES = 120
+RECEIPT_TAIL_LINES = 3          # 动作回执里每条 run 带几行 stdout 末尾（下一轮上下文可见）
 LOCK_STALE_SECONDS = 30.0
 HEARTBEAT_STALE_SECONDS = 60.0
 DEFAULT_COMMAND_TIMEOUT = 1800.0
@@ -110,6 +111,7 @@ DEFAULT_IMAGES_MAX = 2
 _ACTION_FENCE_LABELS = {"actions", "action", "yaml", "yml", "json", ""}
 _STRICT_FENCE_LABELS = {"actions", "action"}
 _FENCE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+\-]*)[ \t]*\r?\n(.*?)```", re.S)
+_OPEN_FENCE_RE = re.compile(r"```[ \t]*(actions|action)[ \t]*\r?\n", re.S)
 # 模型时不时把 YAML 语法键打成全角；先按原样解析，失败才归一化重试（不碰值的原文）。
 # 全角冒号按中文习惯是紧贴值的（``kind：run``），所以补一个空格才成 YAML 的映射分隔符。
 _FULLWIDTH_TABLE = str.maketrans(
@@ -189,7 +191,7 @@ class LoopConfig:
     params_file: str
     editable: Tuple[str, ...]
     commands: Mapping[str, Tuple[str, ...]]
-    images_glob: str = ""
+    images_glob: Tuple[str, ...] = ()
     images_max: int = DEFAULT_IMAGES_MAX
     system_extra: str = ""
     command_timeout: float = DEFAULT_COMMAND_TIMEOUT
@@ -237,15 +239,20 @@ def load_loop_config(path: Any) -> LoopConfig:
         commands[name.strip()] = tuple(argv)
 
     images = raw.get("images")
-    images_glob = ""
+    images_glob: Tuple[str, ...] = ()
     images_max = DEFAULT_IMAGES_MAX
     if images is not None:
         if not isinstance(images, Mapping):
             raise LoopError(f"loop file {source}: `images` must be a mapping")
+        # glob 允许一个模式（字符串）或一组模式（列表）：多个模式取并集后按 mtime 排序截断
         glob = images.get("glob", "")
-        if not isinstance(glob, str):
-            raise LoopError(f"loop file {source}: `images.glob` must be a string")
-        images_glob = glob.strip()
+        if isinstance(glob, str):
+            globs = [glob]
+        elif isinstance(glob, list) and all(isinstance(item, str) for item in glob):
+            globs = list(glob)
+        else:
+            raise LoopError(f"loop file {source}: `images.glob` must be a string or a list of strings")
+        images_glob = tuple(item.strip() for item in globs if item.strip())
         limit = images.get("max", DEFAULT_IMAGES_MAX)
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
             raise LoopError(f"loop file {source}: `images.max` must be an integer >= 0")
@@ -325,6 +332,23 @@ def parse_actions(text: str) -> Tuple[str, List[dict], List[str]]:
             continue
         actions.extend(block)
         spans.append(match.span())
+    # 未闭合围栏兜底：模型被 max_tokens 截断时常见（有开栅栏、没有闭栅栏）。
+    # 只对严格标签（actions/action）生效，且"直到文末"的内容真能解析成动作表才收。
+    for opener in _OPEN_FENCE_RE.finditer(text):
+        if any(span[0] < opener.start() < span[1] for span in spans):
+            continue                                    # 已被主循环整段收走
+        raw = text[opener.end():]
+        if "```" in raw:
+            continue                                    # 后面还有闭栅栏 ⇒ 不是未闭合
+        block = _parse_action_block(raw)
+        if block is None:
+            notes.append("（动作块未闭合且解析失败：回信可能被 max_tokens 截断）")
+            spans.append((opener.start(), len(text)))
+            break
+        actions.extend(block)
+        spans.append((opener.start(), len(text)))
+        notes.append("（动作块围栏未闭合：按『直到文末』解析——回信可能被 max_tokens 截断）")
+        break
     clean = _remove_spans(text, spans).strip()
     return clean, actions, notes
 
@@ -432,6 +456,72 @@ def _read_json_lenient(path: Path, default: Any) -> Any:
         return default
 
 
+def normalize_card(item: Any, session_root: Path) -> dict:
+    """把模型给的卡片口径归一成会话舱认得的样子（**写盘前**做，避免"空白按钮/无效看图"）。
+
+    两个已知坑（2026-10-05 提交方实测报告）：
+    1. ``options`` 写成字符串列表（如 ``- "A ..."``）⇒ 界面渲染成空白按钮。这里拆出 key/label；
+    2. ``attach.image`` 写成裸文件名（如 ``side.png``）⇒ "看图"按钮点不出图。这里在会话
+       ``pages/``／``renders/`` 里按 basename 找回相对路径；找不到就**丢掉 attach**（宁可不显示按钮）。
+    """
+    card = dict(item) if isinstance(item, Mapping) else {"id": str(item)}
+    raw_options = card.get("options")
+    options: List[dict] = []
+    if isinstance(raw_options, list):
+        for index, opt in enumerate(raw_options):
+            if isinstance(opt, Mapping):
+                key = str(opt.get("key") or (index + 1))
+                label = str(opt.get("label") or opt.get("text") or key)
+                entry = {"key": key, "label": label}
+                if opt.get("desc"):
+                    entry["desc"] = str(opt["desc"])
+                options.append(entry)
+            elif isinstance(opt, str) and opt.strip():
+                text = opt.strip()
+                m = re.match(r"^([A-Za-z0-9])\s*[.、:：)）]?\s*(.*)$", text)
+                if m and m.group(2):
+                    options.append({"key": m.group(1).upper(), "label": m.group(2).strip()})
+                else:
+                    options.append({"key": str(index + 1), "label": text})
+    card["options"] = options
+    attach = card.get("attach")
+    if isinstance(attach, Mapping):
+        image = attach.get("image")
+        resolved = _resolve_session_image(image, session_root) if isinstance(image, str) else None
+        if resolved:
+            card["attach"] = {**attach, "image": resolved}
+        else:
+            card.pop("attach", None)
+    elif attach is not None:
+        card.pop("attach", None)
+    if not isinstance(card.get("title"), str) or not str(card.get("title")).strip():
+        card["title"] = str(card.get("id") or "（无标题卡）")
+    if not isinstance(card.get("text"), str):
+        card["text"] = "" if card.get("text") is None else str(card.get("text"))
+    return card
+
+
+def _resolve_session_image(value: str, session_root: Path) -> Optional[str]:
+    """把会话图引用解析成**会话内相对路径**：已是相对路径且存在即原样；裸文件名在 pages/ 与 renders/ 里找。"""
+    name = (value or "").strip()
+    if not name:
+        return None
+    candidate = (session_root / name).resolve()
+    try:
+        candidate.relative_to(session_root.resolve())
+    except ValueError:
+        return None                                  # 越界：直接丢
+    if candidate.is_file():
+        return name
+    if "/" in name:
+        return None
+    for sub in ("renders", "pages"):
+        cand = session_root / sub / name
+        if cand.is_file():
+            return f"{sub}/{name}"
+    return None
+
+
 def _add_card_by_title(cards: Any, number: int, add_card_image: Any) -> bool:
     """按卡面标题号（"14. …" / "14、…"）找卡并附图；命中返回 True。"""
     hit = False
@@ -500,15 +590,28 @@ def resolve_referenced_images(
     return found
 
 
-def collect_images(task_root: Any, pattern: str, limit: int) -> List[Path]:
-    """任务根下按 glob 找图片，按修改时间从新到旧，取前 ``limit`` 张。"""
-    if not pattern or limit <= 0:
+def collect_images(task_root: Any, pattern: Any, limit: int) -> List[Path]:
+    """任务根下按 glob 找图片，按修改时间从新到旧，取前 ``limit`` 张。
+
+    ``pattern`` 允许**一个模式或一组模式**（列表/元组）：多模式取并集再去重，
+    以便同一次随信里同时带上"标准交付视图"和"对标拼图"这类不同目录的图。
+    """
+    if isinstance(pattern, str):
+        patterns = [pattern]
+    else:
+        patterns = [str(item) for item in (pattern or [])]
+    if limit <= 0:
         return []
-    try:
-        files = [p for p in Path(task_root).glob(pattern) if p.is_file()]
-    except (ValueError, OSError):
-        return []
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    files: List[Path] = []
+    for item in patterns:
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            files += [p for p in Path(task_root).glob(item) if p.is_file()]
+        except (ValueError, OSError):
+            continue
+    files = sorted(set(files), key=lambda p: p.stat().st_mtime, reverse=True)
     return files[:limit]
 
 
@@ -577,6 +680,43 @@ def build_models(
 def _tail_lines(text: str, limit: int) -> List[str]:
     lines = (text or "").splitlines()
     return lines[-limit:] if limit > 0 else lines
+
+
+def _action_receipt(results: Sequence[Mapping[str, Any]]) -> str:
+    """动作结果回执：exit code／耗时／增删数写成**一条系统消息**，供下一轮模型读到。
+
+    不写回执的话，聊天里只有"开始执行命令…"、没有结局，模型下一轮只能空等或重复跑
+    ——"路线二闭环演示"里就撞上过这个断链（模型把台账行一拖再拖，理由是"数字还没回来"）。
+    """
+    lines: List[str] = []
+    for item in results:
+        if not isinstance(item, Mapping):
+            continue
+        kind = str(item.get("kind") or "")
+        if kind == "run":
+            name = item.get("name", "?")
+            if item.get("ok"):
+                secs = item.get("seconds")
+                line = f"run {name}：exit 0" + (f"（{secs}s）" if secs else "")
+            else:
+                line = f"run {name}：失败 —— {str(item.get('error') or '见 loop_log.jsonl')}"
+            tail = [str(x).strip() for x in (item.get("stdout_tail") or []) if str(x).strip()]
+            if tail:
+                line += "；末尾：" + " ｜ ".join(tail)[-260:]
+            lines.append(line)
+        elif kind == "edit_params":
+            lines.append("edit_params：应用 %s 条、失败 %s 条"
+                         % (len(item.get("applied") or []), len(item.get("failed") or [])))
+        elif kind == "session_update":
+            lines.append("session_update：新增 %s、替换 %s"
+                         % (item.get("added"), item.get("replaced")))
+        elif kind == "escalate":
+            lines.append("escalate：已置升级标记（ESCALATION.md）")
+        else:
+            lines.append(f"{kind or '?'}：ok={item.get('ok')}")
+    if not lines:
+        return ""
+    return "动作回执：" + "；".join(lines)
 
 
 def _decode_stream(value: Any) -> str:
@@ -765,7 +905,7 @@ class Driver:
     # -------------------------------------------------------- 上下文
 
     def _system_prompt(self) -> str:
-        glob = self.loop.images_glob or "（未声明）"
+        glob = "、".join(self.loop.images_glob) or "（未声明）"
         prompt = (
             _SYSTEM_PROMPT.replace("<<PARAMS_FILE>>", self.loop.params_file)
             .replace("<<COMMANDS>>", ", ".join(self.loop.commands) or "（无）")
@@ -947,8 +1087,76 @@ class Driver:
         state["updated_ts"] = _now()
         self._write_json(self.session_root / STATE_FILENAME, state)
 
+    def _ingest_new_answers(self) -> int:
+        """把**新提交的问题卡作答**转成一条 user 消息写进 chat.jsonl（返回条数）。
+
+        动机（2026-10-05 提交方两次实测）：会话舱里点『提交本卡』只落 ``answers/<card_id>.json``，
+        驱动却只盯 ``chat.jsonl``——不额外发一句聊天，环路就当没事发生（"已经反馈但 primer 没响应"）。
+        这里按 ``received_at`` 记已消化水位（``seen_answers``），新作答补一条 user 消息，随后照常走
+        ``pending_messages`` 流程；动作、回执、台账、卡片全部与聊天消息一致。
+        """
+        answers_dir = self.session_root / "answers"
+        if not answers_dir.is_dir():
+            return 0
+        state = self._read_json(self.session_root / STATE_FILENAME, {})
+        seen = state.get("seen_answers")
+        if not isinstance(seen, Mapping):
+            # 首次运行（或本功能刚上线）：把**已存在的**作答登记为已消化，避免旧作答集中补触发。
+            seeded: Dict[str, Any] = {}
+            for path in sorted(answers_dir.glob("*.json")):
+                if path.name.startswith("_"):
+                    continue
+                payload = self._read_json(path, None)
+                if isinstance(payload, Mapping) and payload.get("received_at"):
+                    seeded[str(payload.get("card_id") or path.stem)] = str(payload["received_at"])
+            state["seen_answers"] = seeded
+            state["updated_ts"] = _now()
+            self._write_json(self.session_root / STATE_FILENAME, state)
+            return 0
+        seen = dict(seen)
+        appended = 0
+        for path in sorted(answers_dir.glob("*.json")):
+            if path.name.startswith("_"):
+                continue
+            payload = self._read_json(path, None)
+            if not isinstance(payload, Mapping):
+                continue
+            card_id = str(payload.get("card_id") or path.stem)
+            received = str(payload.get("received_at") or "")
+            if not received or seen.get(card_id) == received:
+                continue
+            choice = payload.get("choice")
+            text = str(payload.get("text") or "").strip()
+            line = f"【卡片作答】{card_id}：choice={choice if choice else '未选'}"
+            if text:
+                line += f"；补充说明：{text}"
+            self._append_jsonl(
+                self.session_root / CHAT_FILENAME,
+                {"ts": received, "role": "user", "text": line, "model": None,
+                 "source": "answer"},
+            )
+            # 立刻回一条"已受理"：模型作答通常要 20–60 s，先给界面一个确定性反馈
+            # （提交方两次把"还没出结果"读成"primer 没响应"）。
+            self._append_jsonl(
+                self.session_root / CHAT_FILENAME,
+                {"ts": _now(), "role": "system",
+                 "text": f"已受理卡片作答（{card_id}），正在处理…（模型作答通常需要 20–60 s）",
+                 "model": None, "source": "answer_ack"},
+            )
+            seen[card_id] = received
+            appended += 1
+            self._append_log({"ts": _now(), "kind": "answer_ingested", "card_id": card_id,
+                              "choice": choice, "has_text": bool(text)})
+        if appended:
+            state = self._read_json(self.session_root / STATE_FILENAME, {})
+            state["seen_answers"] = seen
+            state["updated_ts"] = _now()
+            self._write_json(self.session_root / STATE_FILENAME, state)
+        return appended
+
     def run_once(self) -> int:
         """处理所有未读的用户消息（逐条顺序、各自回一条），返回处理条数。"""
+        self._ingest_new_answers()
         pending, cursor = self.pending_messages()
         for offset, message in enumerate(pending):
             self._handle(message)
@@ -1027,6 +1235,9 @@ class Driver:
         body, actions, notes = parse_actions(reply.content)
         if degraded:
             notes.append("（端点拒绝了图片输入，本轮已按纯文本重试）")
+        if str(getattr(reply, "finish_reason", "") or "") == "length":
+            notes.append("（回信被 max_tokens 截断：正文与动作块都可能不完整，"
+                         "请把长回复拆成多轮）")
         executed: List[dict] = []
         refs: List[str] = []
         if self.no_actions:
@@ -1056,6 +1267,12 @@ class Driver:
                 note = _action_note(result)
                 if note:
                     notes.append(note)
+            receipt = _action_receipt(executed)
+            if receipt:
+                self._append_jsonl(
+                    self.session_root / CHAT_FILENAME,
+                    {"ts": _now(), "role": "system", "text": receipt, "model": label},
+                )
         text = body
         if notes:
             text = (text + "\n\n" + "\n".join(notes)).strip()
@@ -1245,6 +1462,7 @@ class Driver:
             "exit_code": exit_code,
             "seconds": round(seconds, 1),
             "refs": refs,
+            "stdout_tail": _tail_lines(stdout_text, RECEIPT_TAIL_LINES),
         }
         if exit_code != 0:
             tail = _tail_lines(stderr_text or stdout_text, 5)
@@ -1267,6 +1485,8 @@ class Driver:
                 return {"kind": "session_update", "ok": False, "error": f"{key} must be a list"}
             if not incoming:
                 continue
+            if key == "cards":
+                incoming = [normalize_card(item, self.session_root) for item in incoming]
             path = self.session_root / filename
             document = self._read_json(path, {list_key: []})
             existing = document.get(list_key) if isinstance(document.get(list_key), list) else []
