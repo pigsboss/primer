@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -30,9 +32,17 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from .importers import SourceData
 from .refine import _TARGET_COLUMNS, _cell, _ensure_column, _refresh, _reverse_map, _year_value
 
-__all__ = ["OPENALEX_URL", "TITLE_RATIO", "VerifyReport", "openalex_lookup", "verify_source"]
+__all__ = [
+    "OPENALEX_KEY_ENV",
+    "OPENALEX_URL",
+    "TITLE_RATIO",
+    "VerifyReport",
+    "openalex_lookup",
+    "verify_source",
+]
 
 OPENALEX_URL = "https://api.openalex.org/works"
+OPENALEX_KEY_ENV = "PRIMER_OPENALEX_API_KEY"
 USER_AGENT = "primer-literature-web/0.1 (research)"
 PAUSE_SECONDS = 0.12
 REQUEST_TIMEOUT = 20.0
@@ -65,12 +75,36 @@ class VerifyReport:
 
 
 def openalex_lookup(title: str) -> list[dict[str, Any]]:
-    """在 OpenAlex 按标题检索（无 key，礼貌池）；返回前 5 个候选的规范化字段。"""
-    query = urllib.parse.urlencode({
+    """在 OpenAlex 按标题检索：**公共池优先，公共池限流时回落个人 key**。
+
+    先不带 key 请求（公共池）；返回 HTTP 429（公共额度用完／被限流）时，读取
+    :data:`OPENALEX_KEY_ENV`（``.env`` 注入）里的个人 key 重试同一查询一次；
+    未配置 key 时抛出点名该变量的可操作错误。非 429 的错误不重试、原样上抛。
+    """
+    try:
+        return _openalex_title_search(title, api_key="")
+    except urllib.error.HTTPError as exc:
+        if exc.code != 429:
+            raise
+        api_key = os.environ.get(OPENALEX_KEY_ENV, "").strip()
+        if not api_key:
+            raise RuntimeError(
+                f"OpenAlex rate limited (HTTP 429) and {OPENALEX_KEY_ENV} is not set: "
+                "register a free OpenAlex API key and put it in .env"
+            ) from exc
+    return _openalex_title_search(title, api_key=api_key)
+
+
+def _openalex_title_search(title: str, *, api_key: str) -> list[dict[str, Any]]:
+    """一次 OpenAlex 检索（``api_key`` 为空即公共池）；返回前 5 个候选的规范化字段。"""
+    params = {
         "search": title,
         "per-page": 5,
         "select": "title,doi,publication_year,authorships,primary_location,type,biblio",
-    })
+    }
+    if api_key:
+        params["api_key"] = api_key
+    query = urllib.parse.urlencode(params)
     request = urllib.request.Request(
         f"{OPENALEX_URL}?{query}", headers={"User-Agent": USER_AGENT}
     )
