@@ -2477,11 +2477,21 @@ function renderFetch() {
     parseRow.appendChild(parseBox);
     parseRow.appendChild(document.createTextNode(" 下载后自动 MinerU 解析（默认关，避免挤爆解析队列）"));
     host.appendChild(parseRow);
+    const onlineRow = el("label", "check-row");
+    const onlineBox = document.createElement("input");
+    onlineBox.type = "checkbox";
+    onlineBox.id = "ft-online";
+    onlineBox.checked = false;
+    onlineRow.appendChild(onlineBox);
+    onlineRow.appendChild(
+      document.createTextNode(" 联网补查（对缺链接的记录现场查询学术引擎；较慢，已做过联网比对的库不用勾）")
+    );
+    host.appendChild(onlineRow);
     host.appendChild(
       el(
         "p",
         "hint",
-        "解析阶段只生成下载计划：arXiv 直链优先 → 记录已有下载链接 → 现场联网补查；doi.org 一类落地页归「需人工」，不在自动下载之列。"
+        "解析阶段只生成下载计划：arXiv 直链优先 → 记录已有下载链接；勾选「联网补查」时才对缺链接记录现场联网。doi.org 一类落地页归「需人工」，不在自动下载之列。"
       )
     );
     host.appendChild(
@@ -2644,8 +2654,13 @@ async function startFetchScan() {
   const scope = scopeNode ? scopeNode.value : "missing";
   const parseNode = byId("ft-parse");
   ftAutoParse = parseNode ? parseNode.checked : false;
+  const onlineNode = byId("ft-online");
   const dirInput = byId("ft-dir");
-  const payload = { scope, target_dir: dirInput ? dirInput.value.trim() : "" };
+  const payload = {
+    scope,
+    target_dir: dirInput ? dirInput.value.trim() : "",
+    online: onlineNode ? onlineNode.checked : false,
+  };
   if (scope === "selected") payload.uuids = Array.from(state.selection);
   let started;
   try {

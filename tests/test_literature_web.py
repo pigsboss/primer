@@ -2031,3 +2031,52 @@ def test_fetch_scan_and_download(tmp_path):
         item for item in reloaded.library.file_records if item.record_uuid == record_uuid
     )
     assert file_record.nature == "auto-download" and file_record.status == "downloaded"
+
+
+def test_fetch_scan_online_toggle(tmp_path):
+    import time
+
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    service = S.LibraryService.initial(str(path))
+    calls = []
+
+    def fake_engine(title):
+        calls.append(title)
+        return [{"title": title, "year": 2020, "download_url": "https://arxiv.org/pdf/1234.5678"}]
+
+    service._web_lookup = [fake_engine]
+    server = _Server(service)
+    try:
+        _, created = server.request("POST", "/api/records", {"title": "White paper on space science"})
+        assert created["record"]["uuid"]
+
+        def scan(online):
+            status, started = server.request(
+                "POST",
+                "/api/fetch/scan",
+                {"scope": "missing", "target_dir": str(tmp_path / "refs"), "online": online},
+            )
+            assert status == 200
+            deadline = time.time() + 10
+            payload = None
+            while time.time() < deadline:
+                _, payload = server.request("POST", "/api/fetch/status", {"token": started["token"]})
+                if payload["status"] != "running":
+                    break
+                time.sleep(0.05)
+            assert payload["status"] == "done"
+            return payload["result"]
+
+        result = scan(False)
+        assert calls == []
+        plan = result["plans"][0]
+        assert plan["expected"] == "none" and plan["source"] == "none"
+
+        result = scan(True)
+        assert calls == ["White paper on space science"]
+        plan = result["plans"][0]
+        assert plan["expected"] == "direct" and plan["source"] == "live-lookup"
+        assert plan["url"] == "https://arxiv.org/pdf/1234.5678"
+    finally:
+        server.close()

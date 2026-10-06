@@ -46,7 +46,7 @@
     POST   /api/links/batch/status {token} 关联任务进度；完成后附提案清单＋缺文清单
     POST   /api/links/batch/apply  {pairs} 用户确认后把关联对批量落库（一次落盘）
     POST   /api/links/batch/export {kind: "missing"|"pairs", path} 把最近一轮结果导出为 CSV
-    POST   /api/fetch/scan        {scope: "missing"|"all"|"selected", uuids?, target_dir?} 启动原文下载解析（后台；只生成计划）
+    POST   /api/fetch/scan        {scope: "missing"|"all"|"selected", uuids?, target_dir?, online?} 启动原文下载解析（后台；只生成计划；online 默认 true，false 则不联网补查）
     POST   /api/fetch/status      {token} 下载任务进度；解析完成附计划，下载完成附逐条结果
     POST   /api/fetch/download    {token, uuids, auto_parse?} 对勾选的「可直接下载」条目执行下载（后台；校验后登记挂链）
     GET    /static/<rel>          静态资源（限包内 static/ 目录）
@@ -692,9 +692,12 @@ class LibraryService:
         return library.path.parent / "下载"
 
     def start_fetch_scan(
-        self, scope: Any, uuids: Any = None, target_dir: Any = None
+        self, scope: Any, uuids: Any = None, target_dir: Any = None, online: Any = True
     ) -> dict[str, Any]:
-        """启动「批量下载原文」的解析阶段（后台线程；只生成计划，不下载、不改库）。"""
+        """启动「批量下载原文」的解析阶段（后台线程；只生成计划，不下载、不改库）。
+
+        ``online`` 为假时不做现场引擎补查——计划只用记录里已有的链接（秒级出结果）。
+        """
         if scope not in ("missing", "all", "selected"):
             raise LibraryError(
                 f"unknown scope: {scope!r} (expected 'missing'/'all'/'selected')"
@@ -726,7 +729,7 @@ class LibraryService:
                     target = library.path.parent / target
             else:
                 target = self._default_fetch_dir(library)
-            engines = self._build_engines()
+            engines = self._build_engines() if online else []
             token = str(_uuid.uuid4())
             self.fetch_job = {
                 "token": token,
@@ -2615,7 +2618,10 @@ def make_handler(service: LibraryService):
                     return self._send_json(
                         200,
                         service.start_fetch_scan(
-                            payload.get("scope"), payload.get("uuids"), payload.get("target_dir")
+                            payload.get("scope"),
+                            payload.get("uuids"),
+                            payload.get("target_dir"),
+                            payload.get("online", True),
                         ),
                     )
                 if path == "/api/fetch/status":
