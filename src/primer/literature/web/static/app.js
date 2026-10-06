@@ -3110,6 +3110,15 @@ function renderMdProjectsResults(host) {
   );
   const toolbar = el("div", "lb-toolbar");
   toolbar.appendChild(
+    button("重选清单…", () => {
+      mpPhase = "pick";
+      mpData = null;
+      mpFile = "";
+      mpChecked = new Set();
+      renderMdProjects();
+    })
+  );
+  toolbar.appendChild(
     button("全选", () => {
       for (const group of groups) mpChecked.add(group.project);
       renderMdProjects();
