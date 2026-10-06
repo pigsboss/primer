@@ -415,3 +415,4 @@ td.coverage.none, td.coverage.unknown { color: #8c959f; }
 .lb-toolbar .hint { flex: 1; }
 .lb-missing-file { color: var(--muted); font-size: 12px; }
 .lb-suspect { color: #9a6700; font-size: 12px; }
+#file-dialog { z-index: 70; }

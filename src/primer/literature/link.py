@@ -242,6 +242,7 @@ def propose_links(
     *,
     scope: str = "unlinked",
     read_markdown: Callable[[Any], str],
+    online_lookup: Optional[Callable[[Any, Sequence[str]], Sequence[str]]] = None,
     on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> dict[str, Any]:
     """跑一整轮匹配；返回 ``{"proposals", "missing", "stats"}``。
@@ -249,6 +250,11 @@ def propose_links(
     ``scope``：``unlinked``（仅未关联文件；默认）｜``all``（全部文件，已关联的
     计入 ``stats["skipped_linked"]``、不重复提案）。只评估 ``status == "done"``
     且有 ``md_path`` 的文件，其余计入 ``stats["skipped_unparsed"]``。
+
+    ``online_lookup``（可选）：对本地未命中（``none``／``weak``）的文件做**联网
+    增强**——回调收 ``(文件记录, 本地题名候选)``，返回额外题名候选（如按 DOI 取
+    回的规范题名、或题名检索结果）；用扩充后的候选择优，命中即升级为提案
+    （``how="online"``）；回调异常按"该文件无结果"处理。
     """
     if scope not in ("unlinked", "all"):
         raise ValueError(f"unknown scope: {scope!r} (expected 'unlinked' or 'all')")
@@ -274,13 +280,39 @@ def propose_links(
         "skipped_linked": skipped_linked,
         "skipped_unparsed": skipped_unparsed,
     }
+    rank = {"none": 0, "weak": 1, "suggest": 2, "strong": 3}
     proposals: list[dict[str, Any]] = []
     covered: set[int] = set()
     best_candidates: list[tuple[Any, str]] = []
+    tier_by_uuid: dict[str, str] = {}
+    candidate_cache: dict[str, list[str]] = {}
     total = len(targets)
+
+    def emit(f: Any, match: dict[str, Any], tier: str, how: str) -> None:
+        record = records[match["idx"]]
+        group = index["groups"].get(index["norms"][match["idx"]], [match["idx"]])
+        if tier in ("strong", "suggest"):
+            covered.update(group)
+        proposals.append(
+            {
+                "file_uuid": getattr(f, "uuid", ""),
+                "name": getattr(f, "name", "") or getattr(f, "path", ""),
+                "record_uuid": getattr(record, "uuid", ""),
+                "record_title": getattr(record, "title", ""),
+                "record_year": getattr(record, "year", ""),
+                "tier": tier,
+                "how": how,
+                "ratio": round(match["ratio"], 3),
+                "margin": round(match["margin"], 3),
+                "tie": bool(match.get("tie")),
+                "nature": _nature_for(how),
+            }
+        )
+
     for done, f in enumerate(targets, start=1):
         text = read_markdown(f) or ""
         candidates = markdown_title_candidates(text)
+        candidate_cache[getattr(f, "uuid", "")] = candidates
         match = match_file(
             index,
             doi=getattr(f, "doi", ""),
@@ -290,32 +322,51 @@ def propose_links(
         tier = tier_for(match)
         stats["evaluated"] += 1
         stats[tier] += 1
+        tier_by_uuid[getattr(f, "uuid", "")] = tier
         if match is not None:
             candidate = match.get("candidate") or ""
             if candidate:
                 best_candidates.append((f, norm_text(candidate)))
             if tier in ("strong", "suggest", "weak"):
-                record = records[match["idx"]]
-                group = index["groups"].get(index["norms"][match["idx"]], [match["idx"]])
-                if tier in ("strong", "suggest"):
-                    covered.update(group)
-                proposals.append(
-                    {
-                        "file_uuid": getattr(f, "uuid", ""),
-                        "name": getattr(f, "name", "") or getattr(f, "path", ""),
-                        "record_uuid": getattr(record, "uuid", ""),
-                        "record_title": getattr(record, "title", ""),
-                        "record_year": getattr(record, "year", ""),
-                        "tier": tier,
-                        "how": match["how"],
-                        "ratio": round(match["ratio"], 3),
-                        "margin": round(match["margin"], 3),
-                        "tie": bool(match.get("tie")),
-                        "nature": _nature_for(match["how"]),
-                    }
-                )
+                emit(f, match, tier, match["how"])
         if on_progress is not None:
             on_progress(done, total)
+
+    if online_lookup is not None:
+        stats["online_checked"] = 0
+        stats["online_upgraded"] = 0
+        online_targets = [
+            f for f in targets if tier_by_uuid.get(getattr(f, "uuid", "")) in ("none", "weak")
+        ]
+        online_total = len(online_targets)
+        for step, f in enumerate(online_targets, start=1):
+            stats["online_checked"] += 1
+            local = candidate_cache.get(getattr(f, "uuid", ""), [])
+            try:
+                extra = [
+                    str(item).strip()
+                    for item in (online_lookup(f, list(local)) or [])
+                    if str(item or "").strip()
+                ]
+            except Exception:
+                extra = []
+            if extra:
+                match = match_file(index, doi="", eprint="", candidates=list(local) + extra)
+                tier = tier_for(match)
+                current = tier_by_uuid.get(getattr(f, "uuid", ""), "none")
+                # 联网升级一律按「存疑」呈现：DOI 抽取可能拿到文内引用的 DOI，
+                # 自动升级只把候选端到人前，是否挂链由人工在预览里勾选。
+                if match is not None and tier != "none" and rank["weak"] > rank.get(current, 0):
+                    tier_by_uuid[getattr(f, "uuid", "")] = "weak"
+                    stats["weak"] += 1
+                    stats[current] -= 1
+                    stats["online_upgraded"] += 1
+                    emit(f, match, "weak", "online")
+                    candidate = match.get("candidate") or ""
+                    if candidate:
+                        best_candidates.append((f, norm_text(candidate)))
+            if on_progress is not None:
+                on_progress(total + step, total + online_total)
 
     tier_order = {"strong": 0, "suggest": 1, "weak": 2}
     proposals.sort(key=lambda item: (tier_order.get(item["tier"], 9), -item["ratio"]))

@@ -86,3 +86,14 @@ def test_build_engines_token_gate(monkeypatch, tmp_path):
         "ads_lookup",
         "crossref_lookup",
     ]
+
+
+def test_crossref_doi_payload_title_mapping():
+    from primer.literature.engines import _crossref_doi_payload_title
+
+    assert (
+        _crossref_doi_payload_title({"message": {"title": ["Kepler <i>x</i> &amp; y"]}})
+        == "Kepler x & y"
+    )
+    assert _crossref_doi_payload_title({"message": {}}) == ""
+    assert _crossref_doi_payload_title({"status": "ok"}) == ""

@@ -30,6 +30,7 @@ __all__ = [
     "CROSSREF_URL",
     "CROSSREF_TYPE_MAP",
     "ads_lookup",
+    "crossref_doi_title",
     "crossref_lookup",
 ]
 
@@ -232,3 +233,31 @@ def _ads_year(value: Any) -> Optional[int]:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return None
+
+
+# --------------------------------------- Crossref 按 DOI 取规范题名（自动关联用）
+
+def crossref_doi_title(doi: str) -> str:
+    """按 DOI 查 Crossref 取规范题名（「自动关联」联网增强用）；取不到返回空串。"""
+    key = str(doi or "").strip()
+    if not key:
+        return ""
+    request = urllib.request.Request(
+        f"{CROSSREF_URL}/{urllib.parse.quote(key)}", headers={"User-Agent": USER_AGENT}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return ""
+    finally:
+        time.sleep(PAUSE_SECONDS)
+    return _crossref_doi_payload_title(payload)
+
+
+def _crossref_doi_payload_title(payload: Any) -> str:
+    """从 Crossref ``/works/{doi}`` 响应里取规范题名（纯映射，供单测）。"""
+    message = payload.get("message") if isinstance(payload, dict) else None
+    if not isinstance(message, dict):
+        return ""
+    return _clean_title(message.get("title"))

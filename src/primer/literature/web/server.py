@@ -42,9 +42,10 @@
     POST   /api/files/delete      {uuid} 删除文件记录（磁盘上的文件与产物不动）
     POST   /api/links/attach      {record_uuid, file_uuids, nature?} 把文件挂到文献记录（改挂／改性质）
     POST   /api/links/detach      {file_uuids} 解除文件记录的文献关联
-    POST   /api/links/batch/start  {scope: "unlinked"|"all"} 启动「文件 × 文献」批量自动关联（后台计算，不改库）
+    POST   /api/links/batch/start  {scope: "unlinked"|"all", online?} 启动「文件 × 文献」批量自动关联（后台计算，不改库；online 启用联网增强）
     POST   /api/links/batch/status {token} 关联任务进度；完成后附提案清单＋缺文清单
     POST   /api/links/batch/apply  {pairs} 用户确认后把关联对批量落库（一次落盘）
+    POST   /api/links/batch/export {kind: "missing"|"pairs", path} 把最近一轮结果导出为 CSV
     GET    /static/<rel>          静态资源（限包内 static/ 目录）
 
 错误响应统一为 ``{"error": <机器码>, "message": <英文>}``；状态码：校验 400、
@@ -173,6 +174,7 @@ class LibraryService:
         self._web_lookup = web_lookup
         self._parser = parser
         self._picker = picker
+        self._doi_title_lookup: Optional[Callable[[str], str]] = None
         self._parse_threads: list[threading.Thread] = []
         self._retiring: set[int] = set()
         self.load_error = ""
@@ -434,10 +436,14 @@ class LibraryService:
 
     # ----------------------------------------------------- 批量自动关联
 
-    def start_link_batch(self, scope: Any) -> dict[str, Any]:
-        """启动一轮「文件 × 文献」自动关联（后台线程；只计算，不改库）。"""
+    def start_link_batch(self, scope: Any, online: Any = False) -> dict[str, Any]:
+        """启动一轮「文件 × 文献」自动关联（后台线程；只计算，不改库）。
+
+        ``online`` 为真时启用联网增强：对本地未命中的文件按 DOI／题名查学术引擎。
+        """
         if scope not in ("unlinked", "all"):
             raise LibraryError(f"unknown scope: {scope!r} (expected 'unlinked' or 'all')")
+        online = bool(online)
         with self._lock:
             library = self._require()
             job = self.link_job
@@ -450,6 +456,7 @@ class LibraryService:
             self.link_job = {
                 "token": token,
                 "scope": scope,
+                "online": online,
                 "status": "running",
                 "done": 0,
                 "total": len(files),
@@ -458,11 +465,11 @@ class LibraryService:
             }
             thread = threading.Thread(
                 target=self._run_link_batch,
-                args=(token, records, files, scope, library_dir),
+                args=(token, records, files, scope, online, library_dir),
                 daemon=True,
             )
         thread.start()
-        return {"started": True, "token": token, "total": len(files)}
+        return {"started": True, "token": token, "total": len(files), "online": online}
 
     def link_batch_status(self, token: Any) -> dict[str, Any]:
         """关联任务进度；完成后附 ``result``（提案＋缺文清单＋统计）。"""
@@ -475,6 +482,7 @@ class LibraryService:
             payload = {
                 "status": job["status"],
                 "scope": job["scope"],
+                "online": job.get("online", False),
                 "done": job["done"],
                 "total": job["total"],
             }
@@ -490,9 +498,10 @@ class LibraryService:
         records: list[Record],
         files: list[FileRecord],
         scope: str,
+        online: bool,
         library_dir: Path,
     ) -> None:
-        """后台关联线程：读解析产物、跑匹配；任何异常都收成 job 的 failed。"""
+        """后台关联线程：读解析产物、跑匹配（可选联网增强）；异常收成 job failed。"""
         from ..link import propose_links
 
         job = self.link_job
@@ -513,9 +522,49 @@ class LibraryService:
                 job["done"] = done
                 job["total"] = total
 
+        online_lookup = None
+        if online:
+
+            def online_lookup(file_record: FileRecord, candidates: list[str]) -> list[str]:
+                """联网增强：DOI → Crossref 规范题名；没有就按题名走引擎链取候选题名。"""
+                titles: list[str] = []
+                doi = str(getattr(file_record, "doi", "") or "").strip()
+                if doi:
+                    try:
+                        if self._doi_title_lookup is not None:
+                            title = self._doi_title_lookup(doi) or ""
+                        else:
+                            from ..engines import crossref_doi_title
+
+                            title = crossref_doi_title(doi) or ""
+                    except Exception:
+                        title = ""
+                    if title:
+                        titles.append(str(title))
+                if not titles:
+                    for engine in self._build_engines():
+                        for candidate in list(candidates)[:2]:
+                            try:
+                                results = engine(candidate) or []
+                            except Exception:
+                                continue
+                            if results:
+                                best = str(results[0].get("title") or "").strip()
+                                if best:
+                                    titles.append(best)
+                                break
+                        if titles:
+                            break
+                return titles
+
         try:
             result = propose_links(
-                records, files, scope=scope, read_markdown=read_markdown, on_progress=progress
+                records,
+                files,
+                scope=scope,
+                read_markdown=read_markdown,
+                online_lookup=online_lookup,
+                on_progress=progress,
             )
         except Exception as exc:
             with self._lock:
@@ -570,6 +619,56 @@ class LibraryService:
             if linked:
                 self._persist(library, invalidate_scan=False)
             return {"linked": linked, "replaced": replaced}
+
+    def export_link_batch(self, kind: Any, path_text: Any) -> dict[str, Any]:
+        """把最近一轮关联结果导出为 CSV（``kind`` = ``"missing"``｜``"pairs"``）；不切换库。"""
+        import csv as _csv
+
+        if kind not in ("missing", "pairs"):
+            raise LibraryError(f"unknown export kind: {kind!r} (expected 'missing' or 'pairs')")
+        if not isinstance(path_text, str) or not path_text.strip():
+            raise LibraryError("export path is required")
+        path = Path(path_text).expanduser()
+        with self._lock:
+            self._require()
+            job = self.link_job
+            if not job or job.get("status") != "done" or job.get("result") is None:
+                raise LibraryError("no link batch result to export")
+            result = job["result"]
+            if path.exists():
+                raise LibraryError(f"file already exists: {path}")
+            if kind == "missing":
+                header = ["题名", "年份", "来源", "最像的文件", "相似度"]
+                rows = [
+                    [
+                        item.get("title", ""),
+                        item.get("year", ""),
+                        item.get("venue", ""),
+                        item.get("closest_file", ""),
+                        item.get("closest_ratio", ""),
+                    ]
+                    for item in result.get("missing") or []
+                ]
+            else:
+                header = ["文件", "层级", "相似度", "记录题名", "记录年份", "证据", "nature"]
+                rows = [
+                    [
+                        item.get("name", ""),
+                        item.get("tier", ""),
+                        item.get("ratio", ""),
+                        item.get("record_title", ""),
+                        item.get("record_year", ""),
+                        item.get("how", ""),
+                        item.get("nature", ""),
+                    ]
+                    for item in result.get("proposals") or []
+                ]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = _csv.writer(handle)
+            writer.writerow(header)
+            writer.writerows(rows)
+        return {"exported": len(rows), "path": str(path)}
 
     def bulk_update_records(self, uuids: Any, fields: Any) -> dict[str, Any]:
         """把 ``fields`` 合并进选中记录（只改给定字段）；返回更新条数。"""
@@ -2181,12 +2280,20 @@ def make_handler(service: LibraryService):
                     return self._send_json(200, service.apply_enrich(payload.get("token")))
                 if path == "/api/links/batch/start":
                     return self._send_json(
-                        200, service.start_link_batch(payload.get("scope", "unlinked"))
+                        200,
+                        service.start_link_batch(
+                            payload.get("scope", "unlinked"), payload.get("online", False)
+                        ),
                     )
                 if path == "/api/links/batch/status":
                     return self._send_json(200, service.link_batch_status(payload.get("token")))
                 if path == "/api/links/batch/apply":
                     return self._send_json(200, service.apply_link_batch(payload.get("pairs")))
+                if path == "/api/links/batch/export":
+                    return self._send_json(
+                        200,
+                        service.export_link_batch(payload.get("kind"), payload.get("path")),
+                    )
                 if path == "/api/records/bulk-update":
                     return self._send_json(
                         200,

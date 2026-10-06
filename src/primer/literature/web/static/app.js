@@ -1980,12 +1980,23 @@ function renderLinkBatch() {
     makeChoice("unlinked", "仅未关联文件（" + unlinked + " 个）", true);
     makeChoice("all", "全部已解析文件（" + parsed.length + " 个）", false);
     host.appendChild(row);
+    const net = el("label", "check-row");
+    const netBox = document.createElement("input");
+    netBox.type = "checkbox";
+    netBox.id = "lb-online";
+    netBox.checked = true;
+    net.appendChild(netBox);
+    net.appendChild(
+      document.createTextNode(
+        " 联网增强：对本地未命中的文件，用 DOI／题名查学术引擎链再比一轮（会访问外网、消耗额度）"
+      )
+    );
+    host.appendChild(net);
     host.appendChild(
       el(
         "p",
         "hint",
-        "在本地进行：从解析产物 markdown 抽取题名，与全部文献记录比对（标识符／题名／包容判定）；不联网、不改库。" +
-          "完成后先看提案与缺文清单，点「应用选中关联」才写入。"
+        "在本地进行：从解析产物 markdown 抽取题名，与全部文献记录比对（标识符／题名／包容判定）；不改库，点「应用选中关联」才写入。"
       )
     );
     host.appendChild(
@@ -2045,6 +2056,7 @@ function linkBatchEvidence(item) {
     eprint: "arXiv 一致",
     containment: "包容判定",
     "containment-multi": "包容多义",
+    online: "联网补全",
   };
   const how = labels[item.how] || "题名";
   const ratio = item.how === "title" || item.how === "containment-multi" ? " " + item.ratio.toFixed(3) : "";
@@ -2159,6 +2171,19 @@ function renderLinkBatchMissing(host, missing) {
     })
   );
   toolbar.appendChild(
+    button("导出 CSV…", () => {
+      openFileDialog({
+        title: "导出缺文清单",
+        note: "把当前缺文清单写成 CSV 文件（UTF-8；目标已存在时会拒绝）。",
+        value: "缺失本地文件清单.csv",
+        action: async (path) => {
+          const data = await api("POST", "/api/links/batch/export", { kind: "missing", path });
+          showMessage("已导出 " + data.exported + " 条：" + data.path, "info");
+        },
+      });
+    })
+  );
+  toolbar.appendChild(
     el("span", "hint", "这些文献记录尚未找到本地文件（供获取参考）；「疑似有文件」＝有高相似文件但未达配对门槛，建议人工核。")
   );
   host.appendChild(toolbar);
@@ -2187,9 +2212,11 @@ async function startLinkBatch() {
   byId("lb-error").textContent = "";
   const scopeNode = document.querySelector("input[name='lb-scope']:checked");
   const scope = scopeNode ? scopeNode.value : "unlinked";
+  const onlineNode = byId("lb-online");
+  const online = onlineNode ? onlineNode.checked : false;
   let started;
   try {
-    started = await api("POST", "/api/links/batch/start", { scope });
+    started = await api("POST", "/api/links/batch/start", { scope, online });
   } catch (error) {
     byId("lb-error").textContent = error.message;
     return;

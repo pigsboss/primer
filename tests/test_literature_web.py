@@ -1855,7 +1855,80 @@ def test_link_batch_preview_and_apply(tmp_path):
         _, again = server.request("POST", "/api/links/batch/apply", {"pairs": [pair]})
         assert again["linked"] == 0
 
+        out = tmp_path / "missing.csv"
+        status, data = server.request(
+            "POST", "/api/links/batch/export", {"kind": "missing", "path": str(out)}
+        )
+        assert status == 200 and data["exported"] == 1
+        assert "Beta oceans study" in out.read_text(encoding="utf-8-sig")
+        status, err = server.request(
+            "POST", "/api/links/batch/export", {"kind": "missing", "path": str(out)}
+        )
+        assert status == 409 and "already exists" in err["message"]
+
         status, err = server.request("POST", "/api/links/batch/status", {"token": "missing"})
         assert status == 400 and "no link batch job" in err["message"]
+    finally:
+        server.close()
+
+
+def test_link_batch_online_upgrade(tmp_path):
+    import time
+
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    (tmp_path / "parsed" / "a").mkdir(parents=True)
+    (tmp_path / "parsed" / "a" / "markdown.md").write_text(
+        "# SCIENTIFIC REPORTS\n", encoding="utf-8"
+    )
+    doi_titles = {}
+
+    def fake_doi_title(doi):
+        return doi_titles.get(doi, "")
+
+    service = S.LibraryService.initial(str(path))
+    service._doi_title_lookup = fake_doi_title
+    server = _Server(service)
+    try:
+        _, created = server.request(
+            "POST",
+            "/api/records",
+            {"title": "Real time detection of tsunamigenic earthquakes using GNSS"},
+        )
+        target_uuid = created["record"]["uuid"]
+        library = service.library
+        library.add_file_record({
+            "path": str(tmp_path / "a.pdf"),
+            "name": "a.pdf",
+            "size": 1,
+            "md_path": "parsed/a/markdown.md",
+            "status": "done",
+            "doi": "10.1000/online.test",
+        })
+        service._persist(library, invalidate_scan=False)
+        doi_titles["10.1000/online.test"] = (
+            "Real Time Detection of Tsunamigenic Earthquakes Using GNSS"
+        )
+
+        status, started = server.request(
+            "POST", "/api/links/batch/start", {"scope": "unlinked", "online": True}
+        )
+        assert status == 200 and started["online"] is True
+        token = started["token"]
+        payload = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            _, payload = server.request("POST", "/api/links/batch/status", {"token": token})
+            if payload["status"] != "running":
+                break
+            time.sleep(0.05)
+        assert payload["status"] == "done"
+        result = payload["result"]
+        assert result["stats"]["online_checked"] == 1
+        assert result["stats"]["online_upgraded"] == 1
+        proposal = result["proposals"][0]
+        assert proposal["how"] == "online" and proposal["record_uuid"] == target_uuid
+        assert proposal["tier"] == "weak"
+        assert [item["uuid"] for item in result["missing"]] == [target_uuid]
     finally:
         server.close()

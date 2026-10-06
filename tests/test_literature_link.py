@@ -137,3 +137,50 @@ def test_propose_links_all_scope_rechecks_linked(tmp_path):
     assert result["stats"]["skipped_linked"] == 0
     assert result["stats"]["evaluated"] == 1
     assert result["proposals"][0]["record_uuid"] == "r1"
+
+
+def test_online_lookup_upgrades_unmatched_file(tmp_path):
+    (tmp_path / "a.md").write_text("# SCIENTIFIC REPORTS\n", encoding="utf-8")
+    records = [_record("r1", "Real time detection of tsunamigenic earthquakes using GNSS")]
+    files = [_file("f1", "a.md", str(tmp_path / "a.md"))]
+    seen = []
+
+    def online(file_record, candidates):
+        seen.append((file_record.uuid, list(candidates)))
+        return ["Real time detection of tsunamigenic earthquakes using GNSS"]
+
+    result = propose_links(
+        records,
+        files,
+        scope="unlinked",
+        read_markdown=lambda f: (tmp_path / f.name).read_text(encoding="utf-8"),
+        online_lookup=online,
+    )
+    assert seen and seen[0][0] == "f1"
+    assert result["stats"]["online_checked"] == 1
+    assert result["stats"]["online_upgraded"] == 1
+    proposal = result["proposals"][0]
+    assert proposal["how"] == "online" and proposal["tier"] == "weak"
+    assert proposal["record_uuid"] == "r1"
+    assert [item["uuid"] for item in result["missing"]] == ["r1"]
+    assert result["missing"][0]["closest_ratio"] == 1.0
+
+
+def test_online_lookup_errors_are_ignored(tmp_path):
+    (tmp_path / "a.md").write_text("# SCIENTIFIC REPORTS\n", encoding="utf-8")
+    records = [_record("r1", "Some completely different title here")]
+    files = [_file("f1", "a.md", str(tmp_path / "a.md"))]
+
+    def broken_online(file_record, candidates):
+        raise RuntimeError("engine down")
+
+    result = propose_links(
+        records,
+        files,
+        read_markdown=lambda f: (tmp_path / f.name).read_text(encoding="utf-8"),
+        online_lookup=broken_online,
+    )
+    assert result["stats"]["online_checked"] == 1
+    assert result["stats"]["online_upgraded"] == 0
+    assert result["proposals"] == []
+    assert [item["uuid"] for item in result["missing"]] == ["r1"]
