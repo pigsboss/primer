@@ -41,6 +41,7 @@
         <div class="dropdown-item" data-action="create">新建…</div>
         <div class="dropdown-item" data-action="attach-records">加入选中记录</div>
         <div class="dropdown-item" data-action="infer">按备注推断项目…</div>
+        <div class="dropdown-item" data-action="import-md">从清单 md 导入项目…</div>
         <div class="dropdown-item" data-action="move">移动…</div>
         <div class="dropdown-item" data-action="rename">重命名…</div>
         <div class="dropdown-item" data-action="delete">删除…</div>
@@ -332,6 +333,18 @@
       <div class="dialog-buttons">
         <button id="pi-cancel">关闭</button>
         <button id="pi-primary" class="primary">开始推断</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="mdproj-dialog" class="modal hidden">
+    <div class="dialog wide">
+      <h2>从清单 md 导入项目</h2>
+      <div id="mp-body"></div>
+      <p id="mp-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button id="mp-cancel">关闭</button>
+        <button id="mp-primary" class="primary">选择清单 md…</button>
       </div>
     </div>
   </div>

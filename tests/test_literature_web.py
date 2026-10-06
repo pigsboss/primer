@@ -2235,3 +2235,54 @@ def test_project_infer_endpoint_and_apply(tmp_path):
 
     reloaded = S.LibraryService.initial(str(path))
     assert reloaded.library.find(uuids[0]).projects == ["地震前兆探测"]
+
+
+def test_projects_import_md_endpoint(tmp_path):
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    service = S.LibraryService.initial(str(path))
+    md = tmp_path / "list.md"
+    md.write_text(
+        "# 清单\n\n"
+        "## M 地震前兆探测专题（编号 558–）\n"
+        "[558] Byerlee J. Friction of rocks. Pure and Applied Geophysics, 1978.\n"
+        "## B1 发现与巡天\n"
+        "[560] Survey paper. Space Science Reviews, 2020.\n",
+        encoding="utf-8",
+    )
+    server = _Server(service)
+    friction_uuid = ""
+    try:
+        for title, note in [
+            ("Friction", "原始记录：Byerlee J. Friction of rocks. Pure and Applied Geophysics, 1978."),
+            ("Survey", "原始记录：Survey paper. Space Science Reviews, 2020."),
+            ("Other", "原始记录：对不上的短题录"),
+        ]:
+            status, created = server.request("POST", "/api/records", {"title": title, "notes": note})
+            assert status == 201
+            if title == "Friction":
+                friction_uuid = created["record"]["uuid"]
+
+        status, err = server.request(
+            "POST", "/api/projects/import-md", {"path": str(tmp_path / "nope.md")}
+        )
+        assert status == 400 and "not found" in err["message"]
+
+        status, data = server.request("POST", "/api/projects/import-md", {"path": str(md)})
+        assert status == 200
+        assert data["stats"]["exact"] == 2 and data["stats"]["unmatched"] == 1
+        by_project = {group["project"]: group for group in data["groups"]}
+        assert by_project["地震前兆探测"]["heading"].startswith("M 地震前兆探测专题")
+        assert by_project["地震前兆探测"]["uuids"] == [friction_uuid]
+
+        status, result = server.request(
+            "POST",
+            "/api/projects/attach",
+            {"path": "地震前兆探测", "uuids": by_project["地震前兆探测"]["uuids"]},
+        )
+        assert status == 200 and result["updated"] == 1
+    finally:
+        server.close()
+
+    reloaded = S.LibraryService.initial(str(path))
+    assert reloaded.library.find(friction_uuid).projects == ["地震前兆探测"]

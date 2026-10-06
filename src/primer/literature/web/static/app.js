@@ -2858,7 +2858,7 @@ function renderProjectInfer() {
       el(
         "p",
         "hint",
-        "推断依据：题名＋备注（原始题录引用）＋关键词；后台逐块调用文献角色 LLM（roles.literature／extract／select），只预演、不改库。"
+        "推断依据：题名＋备注（原始题录引用）＋关键词；后台逐块调用文献角色 LLM（roles.literature／extract／select），只预演、不改库。若项目归属写在 md 文献清单的标题行里，用「项目 ▾ → 从清单 md 导入项目…」可直接恢复。"
       )
     );
     return;
@@ -3042,6 +3042,180 @@ async function pollProjectInfer() {
   } finally {
     piPolling = false;
   }
+}
+
+// ------------------------------------------------ 从清单 md 导入项目（标题层级恢复）
+
+let mpPhase = "pick"; // pick | loading | results
+let mpFile = "";
+let mpData = null;
+let mpChecked = new Set();
+
+function mdProjectsOpen() {
+  if (!state.loaded) return;
+  if (!(mpPhase === "results" && mpData)) {
+    mpPhase = "pick";
+    mpData = null;
+  }
+  byId("mp-error").textContent = "";
+  renderMdProjects();
+  byId("mdproj-dialog").classList.remove("hidden");
+}
+
+function renderMdProjects() {
+  const host = byId("mp-body");
+  host.textContent = "";
+  const primary = byId("mp-primary");
+  if (mpPhase === "pick") {
+    primary.textContent = "选择清单 md…";
+    primary.disabled = false;
+    host.appendChild(
+      el(
+        "p",
+        "hint",
+        "选一份 md 文献清单（如《行星探测三十年综述_参考文献.md》总库）：解析「#～####」标题层级，把库内记录按条目行文本匹配回标题（精确优先，长前缀一致时回退）。"
+      )
+    );
+    host.appendChild(
+      el(
+        "p",
+        "hint",
+        "预览按标题分组（项目名＋条数，默认勾选含「专题」的标题）；应用时把各组记录挂入对应项目，已有项目不动。"
+      )
+    );
+    return;
+  }
+  if (mpPhase === "loading") {
+    primary.textContent = "读取中…";
+    primary.disabled = true;
+    host.appendChild(el("div", "lb-progress", "正在解析清单并匹配记录…"));
+    return;
+  }
+  renderMdProjectsResults(host);
+}
+
+function renderMdProjectsResults(host) {
+  const stats = (mpData && mpData.stats) || {};
+  const groups = (mpData && mpData.groups) || [];
+  const unmatched = (mpData && mpData.unmatched) || [];
+  const fileName = mpData && mpData.file ? mpData.file.split("/").pop() : "";
+  host.appendChild(
+    el(
+      "p",
+      "lb-stats",
+      "清单：" + fileName + " ｜ 条目 " + (stats.entries || 0) + " ｜ 匹配 " + (stats.matched || 0) +
+        "（精确 " + (stats.exact || 0) + "＋前缀 " + (stats.prefix || 0) + "）｜ 未匹配 " +
+        (stats.unmatched || 0) + " ｜ 项目组 " + (stats.projects || 0)
+    )
+  );
+  const toolbar = el("div", "lb-toolbar");
+  toolbar.appendChild(
+    button("全选", () => {
+      for (const group of groups) mpChecked.add(group.project);
+      renderMdProjects();
+    })
+  );
+  toolbar.appendChild(
+    button("全不选", () => {
+      mpChecked = new Set();
+      renderMdProjects();
+    })
+  );
+  toolbar.appendChild(el("span", "hint", "勾选＝应用时挂入；默认勾选含「专题」的标题。"));
+  host.appendChild(toolbar);
+  const list = el("div", "lb-list");
+  for (const group of groups) {
+    const row = el("div", "lb-row");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = mpChecked.has(group.project);
+    box.addEventListener("change", () => {
+      if (box.checked) mpChecked.add(group.project);
+      else mpChecked.delete(group.project);
+      updateMdProjectsPrimary();
+    });
+    row.appendChild(box);
+    const main = el("div", "lb-main");
+    main.appendChild(el("div", "lb-file", group.project + "（" + group.count + " 条）"));
+    main.appendChild(el("div", "lb-target", group.heading || ""));
+    row.appendChild(main);
+    list.appendChild(row);
+  }
+  host.appendChild(list);
+  if ((stats.unmatched || 0) > 0) {
+    host.appendChild(el("h3", "detail-section", "未匹配（" + stats.unmatched + "）"));
+    const misses = el("div", "lb-list");
+    for (const item of unmatched) {
+      const row = el("div", "lb-row ignored");
+      const main = el("div", "lb-main");
+      main.appendChild(el("div", "lb-file", item.title || item.uuid));
+      main.appendChild(el("div", "lb-target", item.note || ""));
+      row.appendChild(main);
+      misses.appendChild(row);
+    }
+    host.appendChild(misses);
+  }
+  updateMdProjectsPrimary();
+}
+
+function updateMdProjectsPrimary() {
+  if (mpPhase !== "results") return;
+  const primary = byId("mp-primary");
+  const count = mpChecked.size;
+  primary.textContent = count ? "应用选中（" + count + " 组）" : "应用选中";
+  primary.disabled = count === 0;
+}
+
+async function pickMdList() {
+  byId("mp-error").textContent = "";
+  let picked;
+  try {
+    picked = await api("POST", "/api/files/pick", { kind: "files" });
+  } catch (error) {
+    byId("mp-error").textContent = error.message;
+    return;
+  }
+  if (picked.canceled || !(picked.paths || [])[0]) return;
+  mpFile = picked.paths[0];
+  mpPhase = "loading";
+  renderMdProjects();
+  let data;
+  try {
+    data = await api("POST", "/api/projects/import-md", { path: mpFile });
+  } catch (error) {
+    byId("mp-error").textContent = error.message;
+    mpPhase = "pick";
+    renderMdProjects();
+    return;
+  }
+  mpData = data;
+  mpChecked = new Set(
+    (data.groups || [])
+      .filter((group) => (group.heading || "").includes("专题"))
+      .map((group) => group.project)
+  );
+  mpPhase = "results";
+  renderMdProjects();
+}
+
+async function applyMdProjects() {
+  if (!mpData) return;
+  const groups = (mpData.groups || []).filter((group) => mpChecked.has(group.project));
+  if (!groups.length) return;
+  byId("mp-error").textContent = "";
+  let updated = 0;
+  try {
+    for (const group of groups) {
+      const data = await api("POST", "/api/projects/attach", { path: group.project, uuids: group.uuids });
+      updated += data.updated || 0;
+    }
+  } catch (error) {
+    byId("mp-error").textContent = error.message;
+    return;
+  }
+  byId("mdproj-dialog").classList.add("hidden");
+  showMessage("已挂入项目 " + updated + " 条", "info");
+  await afterMutation();
 }
 
 function switchView(view) {
@@ -3352,6 +3526,7 @@ const PROJECT_ACTIONS = {
   create: projectCreate,
   "attach-records": projectAttachRecords,
   infer: projectInferOpen,
+  "import-md": mdProjectsOpen,
   move: projectMove,
   rename: projectRename,
   delete: projectDelete,
@@ -3367,7 +3542,7 @@ function updateProjectMenu() {
     let disabled = !state.loaded;
     if (action === "attach-records") {
       disabled = disabled || !onNode || state.selection.size === 0;
-    } else if (action !== "create" && action !== "infer") {
+    } else if (action !== "create" && action !== "infer" && action !== "import-md") {
       disabled = disabled || !onNode;
     }
     item.classList.toggle("disabled", disabled);
@@ -3873,6 +4048,11 @@ byId("pi-primary").addEventListener("click", () => {
   else if (piPhase === "results") applyProjectInfer();
 });
 byId("pi-cancel").addEventListener("click", () => byId("pinfer-dialog").classList.add("hidden"));
+byId("mp-primary").addEventListener("click", () => {
+  if (mpPhase === "results") applyMdProjects();
+  else pickMdList();
+});
+byId("mp-cancel").addEventListener("click", () => byId("mdproj-dialog").classList.add("hidden"));
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     hideRowMenu();
@@ -3892,6 +4072,7 @@ document.addEventListener("keydown", (event) => {
     byId("enrich-all-dialog").classList.add("hidden");
     byId("fetch-dialog").classList.add("hidden");
     byId("pinfer-dialog").classList.add("hidden");
+    byId("mdproj-dialog").classList.add("hidden");
     if (!byId("setup").classList.contains("hidden")) {
       byId("setup").classList.add("hidden");
       render();

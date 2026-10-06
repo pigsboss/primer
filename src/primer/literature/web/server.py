@@ -32,6 +32,7 @@
     POST   /api/projects/delete   删除项目及全部子项目（{path}；从记录与注册表移除）
     POST   /api/projects/infer    按备注（LLM）推断记录从属项目（{uuids, candidates}；后台；只预演，进度轮询 …/infer/status）
     POST   /api/projects/infer/status {token} 推断进度；done 时附 proposals＋stats
+    POST   /api/projects/import-md {path} 从 md 清单恢复项目归属（解析标题行＋条目行匹配；只预演）
     PUT    /api/records/<uuid>    更新记录（整条替换）
     DELETE /api/records/<uuid>    删除记录
     POST   /api/scan              校验全部 files[].path 的存在性（不改库文件）
@@ -1095,6 +1096,21 @@ class LibraryService:
             }
             job["done"] = job["total"]
             job["status"] = "done"
+
+    def import_md_projects(self, path_text: Any) -> dict[str, Any]:
+        """从 md 文献清单恢复项目归属：解析标题层级＋匹配条目行；只预演，不改库。"""
+        if not isinstance(path_text, str) or not path_text.strip():
+            raise LibraryError("md list path is required")
+        target = Path(path_text.strip()).expanduser()
+        if not target.is_file():
+            raise LibraryError(f"md list not found: {target}")
+        from ..mdlist import propose_projects_from_md
+
+        with self._lock:
+            library = self._require()
+            records = list(library.records)
+        stats, groups, unmatched = propose_projects_from_md(records, target)
+        return {"file": str(target), "stats": stats, "groups": groups, "unmatched": unmatched}
 
     def bulk_update_records(self, uuids: Any, fields: Any) -> dict[str, Any]:
         """把 ``fields`` 合并进选中记录（只改给定字段）；返回更新条数。"""
@@ -2811,6 +2827,8 @@ def make_handler(service: LibraryService):
                     )
                 if path == "/api/projects/infer/status":
                     return self._send_json(200, service.project_infer_status(payload.get("token")))
+                if path == "/api/projects/import-md":
+                    return self._send_json(200, service.import_md_projects(payload.get("path")))
                 if path == "/api/scan":
                     return self._send_json(200, {"scan": service.scan_files()})
                 if path == "/api/open":
