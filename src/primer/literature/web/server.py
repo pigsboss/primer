@@ -18,7 +18,7 @@
     POST   /api/import/commit     {token, mapping?} 提交导入（库格式可省 mapping；缺标题行跳过）
     POST   /api/import/refine     {token, scope} 启动 LLM 精析（后台线程；进度轮询 /api/import/refine/status）
     POST   /api/import/verify     {token, scope} 启动联网比对（OpenAlex 公共 API；命中置信门槛才回填）
-    POST   /api/export            导出拷贝（可传 uuids 限子集；不切换当前库）
+    POST   /api/export            导出（{path, uuids?, format?, scope?, options?}；format＝library／biblatex／ris／library-list；不切换当前库）
     POST   /api/records           新建记录（服务端补 uuid／时间戳），201
     POST   /api/records/enrich    对选中记录启动后台补全（{uuids, mode: "verify"|"ai"}；只预演，进度轮询 …/enrich/status）
     POST   /api/records/enrich/preview  {token} 取待应用变更清单（旧值→新值，供预览对话框）
@@ -2265,31 +2265,144 @@ class LibraryService:
                 "files_renamed": files_renamed,
             }
 
-    def export_records(self, path_text: Any, uuids: Any = None) -> dict[str, Any]:
-        """把当前库（或 ``uuids`` 子集）导出为一份拷贝；不切换当前库。
+    def _pending_records(self, library: Library) -> list[Record]:
+        """待获取：无已挂链本地文件、且解析计划不是「可直接下载」（不联网）。"""
+        from ..fetch import resolve_download_plan
 
-        全量导出连同本地文件记录一起写出；子集导出只含选中的文献记录。
+        linked = {item.record_uuid for item in library.file_records if item.record_uuid}
+        pending: list[Record] = []
+        for record in library.records:
+            if record.uuid in linked:
+                continue
+            if resolve_download_plan(record, engines=())["expected"] == "direct":
+                continue
+            pending.append(record)
+        return pending
+
+    def export_records(
+        self,
+        path_text: Any,
+        uuids: Any = None,
+        fmt: Any = "library",
+        scope: Any = None,
+        options: Any = None,
+    ) -> dict[str, Any]:
+        """导出当前库（或子集／待获取）为指定格式；不切换当前库。
+
+        ``fmt``：``library``（库 JSON 拷贝，默认、兼容旧调用）／``biblatex``／``ris``／
+        ``library-list``（图书馆清单：md＋CSV 两份）。``scope="missing"`` 用「待获取」
+        集合（无挂链文件且非直链）；其余按 ``uuids``（None＝全部）。目标已存在则拒绝。
         """
+        import os
+
+        from ..exporters import to_biblatex, to_ris
+
+        if fmt not in ("library", "biblatex", "ris", "library-list"):
+            raise LibraryError(
+                f"unknown export format: {fmt!r} (expected library/biblatex/ris/library-list)"
+            )
         if not isinstance(path_text, str) or not path_text.strip():
             raise LibraryError("export path is required")
-        path = Path(path_text).expanduser()
+        target = Path(path_text).expanduser()
+        opts = options if isinstance(options, dict) else {}
+        wanted: Optional[set[str]] = None
+        if uuids is not None:
+            if not isinstance(uuids, list) or any(not isinstance(item, str) for item in uuids):
+                raise LibraryError("uuids must be a list of strings")
+            wanted = set(uuids)
         with self._lock:
             library = self._require()
-            if uuids is None:
+            if scope == "missing":
+                records = self._pending_records(library)
+                file_records: list[Any] = []
+            elif wanted is not None:
+                records = [record for record in library.records if record.uuid in wanted]
+                file_records = []
+            elif fmt == "library":
                 records = list(library.records)
                 file_records = list(library.file_records)
             else:
-                if not isinstance(uuids, list) or any(
-                    not isinstance(item, str) for item in uuids
-                ):
-                    raise LibraryError("uuids must be a list of strings")
-                wanted = set(uuids)
-                records = [record for record in library.records if record.uuid in wanted]
+                records = list(library.records)
                 file_records = []
-            if path.exists():
-                raise LibraryError(f"file already exists: {path}")
-            Library(path, records, file_records).save()
-            return {"exported": len(records), "files": len(file_records), "path": str(path)}
+            file_paths: dict[str, list[Path]] = {}
+            if opts.get("files"):
+                for record in records:
+                    paths: list[Path] = []
+                    for item in library.file_records:
+                        if item.record_uuid != record.uuid:
+                            continue
+                        try:
+                            paths.append(self._resolve_source(library, item.path))
+                        except (OSError, LibraryError):
+                            continue
+                    if paths:
+                        file_paths[record.uuid] = paths
+        if fmt == "library":
+            if target.exists():
+                raise LibraryError(f"file already exists: {target}")
+            Library(target, records, file_records).save()
+            return {"exported": len(records), "files": len(file_records), "path": str(target)}
+        if fmt == "library-list":
+            return self._write_library_list(target, records, opts)
+        files_map: dict[str, list[str]] = {}
+        if file_paths:
+            base_dir = str(target.parent)
+            files_map = {
+                uuid_text: [os.path.relpath(str(path), base_dir) for path in paths]
+                for uuid_text, paths in file_paths.items()
+            }
+        if fmt == "biblatex":
+            text = to_biblatex(
+                records,
+                classic=bool(opts.get("classic")),
+                notes=bool(opts.get("notes")),
+                files=files_map,
+            )
+        else:
+            text = to_ris(records, notes=bool(opts.get("notes")), files=files_map)
+        if target.exists():
+            raise LibraryError(f"file already exists: {target}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        return {"exported": len(records), "path": str(target), "paths": [str(target)]}
+
+    def _write_library_list(
+        self, target: Path, records: list[Record], opts: dict[str, Any]
+    ) -> dict[str, Any]:
+        """图书馆清单：写 ``<前缀>.md`` 与 ``<前缀>.csv``（``batch_size``＞0 时分批加序号）。"""
+        from ..exporters import to_library_list
+
+        name = str(target.with_suffix("")) if target.suffix.lower() in (".md", ".csv") else str(target)
+        try:
+            batch = int(opts.get("batch_size") or 0)
+        except (TypeError, ValueError):
+            batch = 0
+        chunks = (
+            [records]
+            if batch <= 0
+            else [records[start : start + batch] for start in range(0, len(records), batch)]
+        )
+        outputs: list[tuple[Path, Path, str, str]] = []
+        for index, chunk in enumerate(chunks, start=1):
+            base = name + (f"-{index}" if len(chunks) > 1 else "")
+            md_text, csv_text = to_library_list(
+                chunk,
+                group_by=str(opts.get("group_by") or "venue"),
+                links=bool(opts.get("links", True)),
+            )
+            outputs.append((Path(base + ".md"), Path(base + ".csv"), md_text, csv_text))
+        for md_path, csv_path, _, _ in outputs:
+            if md_path.exists():
+                raise LibraryError(f"file already exists: {md_path}")
+            if csv_path.exists():
+                raise LibraryError(f"file already exists: {csv_path}")
+        paths: list[str] = []
+        for md_path, csv_path, md_text, csv_text in outputs:
+            md_path.parent.mkdir(parents=True, exist_ok=True)
+            md_path.write_text(md_text, encoding="utf-8")
+            csv_path.write_text(csv_text, encoding="utf-8-sig")
+            paths.extend([str(md_path), str(csv_path)])
+        return {"exported": len(records), "path": paths[0], "paths": paths}
 
     # ------------------------------------------------------------- 导入
 
@@ -2743,7 +2856,14 @@ def make_handler(service: LibraryService):
                     )
                 if path == "/api/export":
                     return self._send_json(
-                        200, service.export_records(payload.get("path"), payload.get("uuids"))
+                        200,
+                        service.export_records(
+                            payload.get("path"),
+                            payload.get("uuids"),
+                            payload.get("format", "library"),
+                            payload.get("scope"),
+                            payload.get("options"),
+                        ),
                     )
                 if path == "/api/records":
                     return self._send_json(201, {"record": service.add_record(payload)})

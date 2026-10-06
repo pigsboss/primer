@@ -1922,21 +1922,204 @@ async function submitMapping() {
   }
 }
 
+const EXPORT_FORMATS = [
+  ["library", "库 JSON（拷贝）", "可再次打开的库文件；不切换当前库。"],
+  ["biblatex", "BibLaTeX .bib", "LaTeX／JabRef；字段按 biblatex 规范。"],
+  ["ris", "RIS", "Zotero／EndNote／Word 插件。"],
+  ["library-list", "图书馆清单（md＋CSV）", "人读、供照单提供原文；含回填栏。"],
+];
+
+let exFormat = "library";
+let exScope = "all";
+let exNotes = false;
+let exFiles = false;
+let exClassic = false;
+let exLinks = true;
+let exGroupBy = "venue";
+let exBatch = "";
+let exPath = "";
+
+function defaultExportPath(fmt) {
+  const current = state.path || state.defaultPath || "primer.literature.json";
+  const stem = current.toLowerCase().endsWith(".json") ? current.slice(0, -5) : current;
+  if (fmt === "biblatex") return stem + "-export.bib";
+  if (fmt === "ris") return stem + "-export.ris";
+  if (fmt === "library-list") return stem + "-图书馆清单";
+  return stem + "-export.json";
+}
+
 function menuExport() {
   if (!state.loaded) return;
-  const visibleUuids = visibleRecords().map((record) => record.uuid);
-  openFileDialog({
-    title: "导出",
-    note: "写出库 JSON 的拷贝；不切换当前库。",
-    value: suggestCopyPath("-export"),
-    scope: true,
-    action: async (path, scope) => {
-      const payload = { path };
-      if (scope) payload.uuids = visibleUuids;
-      const data = await api("POST", "/api/export", payload);
-      showMessage("已导出 " + data.exported + " 条：" + data.path, "info");
-    },
+  exFormat = "library";
+  exScope = "all";
+  exNotes = false;
+  exFiles = false;
+  exClassic = false;
+  exLinks = true;
+  exGroupBy = "venue";
+  exBatch = "";
+  exPath = "";
+  byId("ex-error").textContent = "";
+  renderExportDialog();
+  byId("export-dialog").classList.remove("hidden");
+}
+
+function addExportCheck(host, id, label, checked, onChange) {
+  const row = el("label", "check-row");
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.id = id;
+  box.checked = checked;
+  box.addEventListener("change", () => onChange(box.checked));
+  row.appendChild(box);
+  row.appendChild(document.createTextNode(" " + label));
+  host.appendChild(row);
+}
+
+function renderExportDialog() {
+  const host = byId("ex-body");
+  host.textContent = "";
+  host.appendChild(el("div", "hint", "格式"));
+  for (const [value, label, note] of EXPORT_FORMATS) {
+    const row = el("label", "check-row");
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "ex-format";
+    radio.value = value;
+    radio.checked = exFormat === value;
+    radio.addEventListener("change", () => {
+      exFormat = value;
+      exScope = value === "library-list" ? "missing" : "all";
+      renderExportDialog();
+    });
+    row.appendChild(radio);
+    row.appendChild(document.createTextNode(" " + label + "　" + note));
+    host.appendChild(row);
+  }
+  host.appendChild(el("div", "hint", "范围"));
+  const visible = visibleRecords().length;
+  const selected = state.selection.size;
+  if (exScope === "selected" && selected === 0) exScope = "all";
+  const scopeRow = el("div", "radio-row");
+  const makeScope = (value, label, disabled) => {
+    const wrap = el("label");
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "ex-scope";
+    radio.value = value;
+    radio.checked = exScope === value;
+    radio.disabled = Boolean(disabled);
+    radio.addEventListener("change", () => {
+      exScope = value;
+    });
+    wrap.appendChild(radio);
+    wrap.appendChild(document.createTextNode(" " + label));
+    scopeRow.appendChild(wrap);
+  };
+  makeScope("all", "全部记录（" + state.records.length + " 条）", false);
+  makeScope("visible", "当前清单（" + visible + " 条）", false);
+  makeScope("selected", "选中记录（" + selected + " 条）", selected === 0);
+  makeScope("missing", "待获取（缺文且非直链）", false);
+  host.appendChild(scopeRow);
+  if (exFormat === "biblatex" || exFormat === "ris") {
+    if (exFormat === "biblatex") {
+      addExportCheck(host, "ex-classic", "经典 BibTeX 字段（journal／year／address）", exClassic, (on) => {
+        exClassic = on;
+      });
+    }
+    addExportCheck(host, "ex-notes", "带备注（note／N1）", exNotes, (on) => {
+      exNotes = on;
+    });
+    addExportCheck(host, "ex-files", "带本地文件路径（file／L1）", exFiles, (on) => {
+      exFiles = on;
+    });
+  } else if (exFormat === "library-list") {
+    const groupRow = el("div", "radio-row");
+    const makeGroup = (value, label) => {
+      const wrap = el("label");
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "ex-group";
+      radio.value = value;
+      radio.checked = exGroupBy === value;
+      radio.addEventListener("change", () => {
+        exGroupBy = value;
+      });
+      wrap.appendChild(radio);
+      wrap.appendChild(document.createTextNode(" " + label));
+      groupRow.appendChild(wrap);
+    };
+    makeGroup("venue", "按刊名/出版者分组");
+    makeGroup("year", "按年份分组");
+    host.appendChild(groupRow);
+    addExportCheck(host, "ex-links", "CSV 含链接列", exLinks, (on) => {
+      exLinks = on;
+    });
+    const batchRow = el("div", "ft-dir-row");
+    batchRow.appendChild(el("span", "hint", "每批条数"));
+    const batchInput = document.createElement("input");
+    batchInput.type = "number";
+    batchInput.id = "ex-batch";
+    batchInput.min = "0";
+    batchInput.value = exBatch;
+    batchInput.addEventListener("input", () => {
+      exBatch = batchInput.value;
+    });
+    batchRow.appendChild(batchInput);
+    batchRow.appendChild(el("span", "hint", "0＝不分批；＞0 时输出 -1／-2… 多组"));
+    host.appendChild(batchRow);
+  }
+  const pathRow = el("div", "ft-dir-row");
+  pathRow.appendChild(el("span", "hint", "目标路径"));
+  const input = document.createElement("input");
+  input.type = "text";
+  input.id = "ex-path";
+  input.spellcheck = false;
+  input.value = exPath || defaultExportPath(exFormat);
+  input.addEventListener("input", () => {
+    exPath = input.value;
   });
+  pathRow.appendChild(input);
+  pathRow.appendChild(
+    button("选择…", async () => {
+      try {
+        const picked = await api("POST", "/api/files/pick", { kind: "folder" });
+        if (picked.canceled || !(picked.paths || [])[0]) return;
+        const base = defaultExportPath(exFormat).split("/").pop();
+        exPath = picked.paths[0].replace(/\/$/, "") + "/" + base;
+        renderExportDialog();
+      } catch (error) {
+        byId("ex-error").textContent = error.message;
+      }
+    })
+  );
+  host.appendChild(pathRow);
+}
+
+async function submitExport() {
+  const input = byId("ex-path");
+  const path = input ? input.value.trim() : "";
+  if (!path) {
+    byId("ex-error").textContent = "请填写目标路径";
+    return;
+  }
+  const payload = { path, format: exFormat, scope: exScope };
+  if (exScope === "visible") payload.uuids = visibleRecords().map((record) => record.uuid);
+  else if (exScope === "selected") payload.uuids = Array.from(state.selection);
+  if (exFormat === "biblatex") {
+    payload.options = { classic: exClassic, notes: exNotes, files: exFiles };
+  } else if (exFormat === "ris") {
+    payload.options = { notes: exNotes, files: exFiles };
+  } else if (exFormat === "library-list") {
+    payload.options = { group_by: exGroupBy, links: exLinks, batch_size: Number(exBatch) || 0 };
+  }
+  try {
+    const data = await api("POST", "/api/export", payload);
+    byId("export-dialog").classList.add("hidden");
+    showMessage("已导出 " + data.exported + " 条：" + (data.paths || [data.path]).join("、"), "info");
+  } catch (error) {
+    byId("ex-error").textContent = error.message;
+  }
 }
 
 const FILE_ACTIONS = {
@@ -4076,6 +4259,8 @@ byId("mp-primary").addEventListener("click", () => {
   else pickMdList();
 });
 byId("mp-cancel").addEventListener("click", () => byId("mdproj-dialog").classList.add("hidden"));
+byId("ex-primary").addEventListener("click", submitExport);
+byId("ex-cancel").addEventListener("click", () => byId("export-dialog").classList.add("hidden"));
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     hideRowMenu();
@@ -4096,6 +4281,7 @@ document.addEventListener("keydown", (event) => {
     byId("fetch-dialog").classList.add("hidden");
     byId("pinfer-dialog").classList.add("hidden");
     byId("mdproj-dialog").classList.add("hidden");
+    byId("export-dialog").classList.add("hidden");
     if (!byId("setup").classList.contains("hidden")) {
       byId("setup").classList.add("hidden");
       render();

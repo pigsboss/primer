@@ -2333,3 +2333,84 @@ def test_projects_import_md_accepts_paths_list(tmp_path):
         assert status == 400 and "not found" in err["message"]
     finally:
         server.close()
+
+
+def test_export_formats_endpoint(tmp_path):
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    service = S.LibraryService.initial(str(path))
+    server = _Server(service)
+    try:
+        posts = [
+            {
+                "title": "Seven temperate planets",
+                "type": "journal-article",
+                "year": 2017,
+                "authors": ["Gillon M."],
+                "venue": "Nature",
+                "doi": "10.1038/nature21360",
+                "download_url": "https://arxiv.org/pdf/1703.01424",
+                "eprint": "1703.01424",
+                "pages": "456–459",
+            },
+            {"title": "Survey paper", "type": "report", "year": 2020, "venue": "NASA"},
+            {"title": "白皮书", "notes": "原始记录：某白皮书. 2021."},
+        ]
+        for payload in posts:
+            status, _ = server.request("POST", "/api/records", payload)
+            assert status == 201
+
+        bib_path = tmp_path / "out.bib"
+        status, data = server.request(
+            "POST", "/api/export", {"path": str(bib_path), "format": "biblatex"}
+        )
+        assert status == 200 and data["exported"] == 3
+        text = bib_path.read_text(encoding="utf-8")
+        assert "@article{gillon2017seven," in text and "@report{" in text
+        assert "eprinttype = {arXiv}" in text
+
+        ris_path = tmp_path / "out.ris"
+        status, data = server.request(
+            "POST", "/api/export", {"path": str(ris_path), "format": "ris"}
+        )
+        assert status == 200 and data["exported"] == 3
+        assert ris_path.read_text(encoding="utf-8").startswith("TY  - JOUR")
+
+        list_prefix = tmp_path / "图书馆清单"
+        status, data = server.request(
+            "POST",
+            "/api/export",
+            {"path": str(list_prefix), "format": "library-list", "scope": "missing"},
+        )
+        assert status == 200 and data["exported"] == 2  # 报告＋白皮书；文章有直链被排除
+        md_path = tmp_path / "图书馆清单.md"
+        csv_path = tmp_path / "图书馆清单.csv"
+        assert md_path.exists() and csv_path.exists()
+        assert "某白皮书. 2021." in md_path.read_text(encoding="utf-8")
+        csv_text = csv_path.read_text(encoding="utf-8-sig")
+        assert csv_text.splitlines()[0].startswith("序号,著录")
+        assert len(csv_text.strip().splitlines()) == 3
+
+        status, data = server.request(
+            "POST",
+            "/api/export",
+            {
+                "path": str(tmp_path / "batch"),
+                "format": "library-list",
+                "options": {"batch_size": 2},
+            },
+        )
+        assert status == 200
+        assert (tmp_path / "batch-1.md").exists() and (tmp_path / "batch-2.md").exists()
+        assert not (tmp_path / "batch-3.md").exists()
+
+        status, err = server.request(
+            "POST", "/api/export", {"path": str(bib_path), "format": "biblatex"}
+        )
+        assert status == 409
+
+        json_path = tmp_path / "copy.json"
+        status, data = server.request("POST", "/api/export", {"path": str(json_path)})
+        assert status == 200 and json_path.exists()
+    finally:
+        server.close()
