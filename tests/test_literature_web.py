@@ -1807,6 +1807,7 @@ def test_link_batch_preview_and_apply(tmp_path):
         alpha_uuid = created["record"]["uuid"]
         server.request("POST", "/api/records", {"title": "Beta oceans study", "year": 2021})
 
+        (tmp_path / "alpha.pdf").write_bytes(b"PDF")
         library = service.library
         library.add_file_record({
             "path": str(tmp_path / "alpha.pdf"),
@@ -1851,6 +1852,9 @@ def test_link_batch_preview_and_apply(tmp_path):
         _, files = server.request("GET", "/api/files")
         item = next(entry for entry in files["files"] if entry["name"] == "alpha.pdf")
         assert item["record_uuid"] == alpha_uuid and item["nature"] == "title-match"
+        assert item["exists"] is True
+        beta_item = next(entry for entry in files["files"] if entry["name"] == "beta.pdf")
+        assert beta_item["exists"] is False
 
         _, again = server.request("POST", "/api/links/batch/apply", {"pairs": [pair]})
         assert again["linked"] == 0

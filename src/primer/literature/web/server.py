@@ -1039,10 +1039,17 @@ class LibraryService:
     PARSE_BATCH_SIZE = 4
 
     def file_records_payload(self) -> dict[str, Any]:
-        """本地文件记录全量＋待解析计数（前端轮询用）。"""
+        """本地文件记录全量＋待解析计数（前端轮询用）；每条附源文件存在性 ``exists``。"""
         with self._lock:
             library = self._require()
-            files = [record.to_dict() for record in library.file_records]
+            files = []
+            for record in library.file_records:
+                payload = record.to_dict()
+                try:
+                    payload["exists"] = self._resolve_source(library, record.path).is_file()
+                except OSError:
+                    payload["exists"] = False
+                files.append(payload)
             parsing = sum(
                 1 for record in library.file_records if record.status in ("pending", "parsing")
             )

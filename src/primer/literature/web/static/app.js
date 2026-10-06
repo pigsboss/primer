@@ -412,15 +412,28 @@ function toggleCollapsed(path) {
   renderTree();
 }
 
+function linkedFilesOf(record) {
+  return (state.fileRecords || []).filter((file) => file.record_uuid === record.uuid);
+}
+
 function coverage(record) {
-  const files = record.files || [];
-  if (!files.length) return { kind: "none", text: "—" };
-  const entries = state.scan && state.scan[record.uuid];
-  if (!entries || entries.length !== files.length) return { kind: "unknown", text: "…" };
-  const exists = entries.filter((entry) => entry.exists).length;
-  if (exists === files.length) return { kind: "ok", text: "✓ " + files.length };
-  if (exists === 0) return { kind: "bad", text: "✗ " + files.length };
-  return { kind: "part", text: exists + "/" + files.length };
+  const legacy = (record.files || []).length;
+  const linked = linkedFilesOf(record);
+  const total = legacy + linked.length;
+  if (!total) return { kind: "none", text: "—" };
+  let exists = 0;
+  let verified = true;
+  if (legacy) {
+    const entries = state.scan && state.scan[record.uuid];
+    if (!entries || entries.length !== legacy) verified = false;
+    else exists += entries.filter((entry) => entry.exists).length;
+  }
+  if (linked.some((file) => file.exists === undefined)) verified = false;
+  else exists += linked.filter((file) => file.exists).length;
+  if (!verified) return { kind: "unknown", text: "…" };
+  if (exists === total) return { kind: "ok", text: "✓ " + total };
+  if (exists === 0) return { kind: "bad", text: "✗ " + total };
+  return { kind: "part", text: exists + "/" + total };
 }
 
 function typeLabel(type) {
@@ -1068,11 +1081,16 @@ function renderStatus() {
     let filesMissing = 0;
     let scanned = false;
     for (const record of state.records) {
-      filesTotal += (record.files || []).length;
+      const linked = linkedFilesOf(record);
+      filesTotal += (record.files || []).length + linked.length;
       const entries = state.scan && state.scan[record.uuid];
       if (entries) {
         scanned = true;
         filesMissing += entries.filter((entry) => !entry.exists).length;
+      }
+      if (linked.length) {
+        scanned = true;
+        filesMissing += linked.filter((file) => file.exists === false).length;
       }
     }
     parts.push(scanned ? "文件 " + (filesTotal - filesMissing) + " ✓ / 缺失 " + filesMissing + " ✗"
@@ -1163,6 +1181,7 @@ async function afterMutation() {
 
 async function openPrimary(record) {
   const files = record.files || [];
+  const linked = linkedFilesOf(record);
   const entries = (state.scan && state.scan[record.uuid]) || [];
   let index = entries.findIndex((entry) => entry.exists);
   const unknown = files.length > 0 && entries.length === 0;
@@ -1171,11 +1190,16 @@ async function openPrimary(record) {
     await openFileIndex(record, index);
     return;
   }
+  const openable = linked.find((file) => file.exists !== false);
+  if (openable) {
+    await openFileRecord(openable, "source");
+    return;
+  }
   if (record.doi) {
     openDoi(record);
     return;
   }
-  showMessage(files.length ? "本地文件均缺失" : "没有本地文件，也没有 DOI", "error");
+  showMessage(files.length || linked.length ? "本地文件均缺失" : "没有本地文件，也没有 DOI", "error");
 }
 
 async function openFileIndex(record, index) {
