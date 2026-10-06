@@ -7,6 +7,7 @@ const NATURES = [
   ["doi-consistent", "正式"],
   ["preprint-substitute", "预印本"],
   ["title-match", "题名匹配"],
+  ["auto-download", "自动下载"],
   ["manual-upload", "人工"],
   ["other", "其他"],
 ];
@@ -466,7 +467,13 @@ function fileSuffix(record) {
   return match ? match[1].toLowerCase() : "—";
 }
 
-const FILE_STATUS_LABELS = { pending: "待解析", parsing: "解析中", done: "已完成", failed: "失败" };
+const FILE_STATUS_LABELS = {
+  pending: "待解析",
+  parsing: "解析中",
+  done: "已完成",
+  failed: "失败",
+  downloaded: "已下载",
+};
 
 function fileStatusLabel(status) {
   return FILE_STATUS_LABELS[status] || status || "—";
@@ -1909,6 +1916,7 @@ const FILE_ACTIONS = {
   "scan-folder": menuScanFolder,
   "add-files": menuAddFiles,
   "auto-link": autoLink,
+  "fetch-papers": fetchPapersOpen,
   export: menuExport,
 };
 
@@ -2357,6 +2365,390 @@ async function applyLinkBatch() {
   } catch (error) {
     byId("lb-error").textContent = error.message;
     byId("lb-primary").disabled = false;
+  }
+}
+
+// ------------------------------------------------ 批量下载原文（合法 OA 直链）
+
+let ftPhase = "options"; // options | scanning | results | downloading | report
+let ftToken = null;
+let ftScan = null;
+let ftReport = null;
+let ftChecked = new Set();
+let ftPolling = false;
+let ftDone = 0;
+let ftTotal = 0;
+let ftTarget = "";
+let ftAutoParse = false;
+
+function fetchPapersOpen() {
+  if (!state.loaded) return;
+  if (
+    !(
+      ftPhase === "scanning" ||
+      ftPhase === "downloading" ||
+      (ftPhase === "results" && ftScan) ||
+      (ftPhase === "report" && ftReport)
+    )
+  ) {
+    ftPhase = "options";
+    ftScan = null;
+    ftReport = null;
+    ftToken = null;
+  }
+  byId("ft-error").textContent = "";
+  renderFetch();
+  byId("fetch-dialog").classList.remove("hidden");
+  if (ftPhase === "scanning" || ftPhase === "downloading") pollFetch();
+}
+
+function defaultFetchDir() {
+  const counts = {};
+  for (const file of state.fileRecords || []) {
+    const parts = String(file.path || "").split("/");
+    if (parts.length < 2) continue;
+    const parent = parts.slice(0, -1).join("/");
+    counts[parent] = (counts[parent] || 0) + 1;
+  }
+  let best = "";
+  let bestCount = 0;
+  for (const [dir, count] of Object.entries(counts)) {
+    if (count > bestCount) {
+      best = dir;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+function renderFetch() {
+  const host = byId("ft-body");
+  host.textContent = "";
+  const primary = byId("ft-primary");
+  if (ftPhase === "options") {
+    primary.textContent = "开始解析";
+    primary.disabled = false;
+    const linked = new Set(
+      (state.fileRecords || []).filter((file) => file.record_uuid).map((file) => file.record_uuid)
+    );
+    const missing = state.records.filter((record) => !linked.has(record.uuid)).length;
+    const selection = state.selection ? state.selection.size : 0;
+    const row = el("div", "radio-row");
+    const makeChoice = (value, label, checked, disabled) => {
+      const wrap = el("label");
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "ft-scope";
+      radio.value = value;
+      radio.checked = checked;
+      radio.disabled = Boolean(disabled);
+      wrap.appendChild(radio);
+      wrap.appendChild(document.createTextNode(" " + label));
+      row.appendChild(wrap);
+    };
+    makeChoice("missing", "仅缺本地文件（" + missing + " 条）", true, false);
+    makeChoice("all", "全部记录（" + state.records.length + " 条）", false, false);
+    makeChoice("selected", "选中的记录（" + selection + " 条）", false, selection === 0);
+    host.appendChild(row);
+    const dirRow = el("div", "ft-dir-row");
+    dirRow.appendChild(el("span", "hint", "目标目录"));
+    const dirInput = document.createElement("input");
+    dirInput.type = "text";
+    dirInput.id = "ft-dir";
+    dirInput.spellcheck = false;
+    dirInput.value = defaultFetchDir();
+    dirRow.appendChild(dirInput);
+    dirRow.appendChild(
+      button("选择…", async () => {
+        try {
+          const picked = await api("POST", "/api/files/pick", { kind: "folder" });
+          if (!picked.canceled && (picked.paths || [])[0]) dirInput.value = picked.paths[0];
+        } catch (error) {
+          byId("ft-error").textContent = error.message;
+        }
+      })
+    );
+    host.appendChild(dirRow);
+    const parseRow = el("label", "check-row");
+    const parseBox = document.createElement("input");
+    parseBox.type = "checkbox";
+    parseBox.id = "ft-parse";
+    parseBox.checked = false;
+    parseRow.appendChild(parseBox);
+    parseRow.appendChild(document.createTextNode(" 下载后自动 MinerU 解析（默认关，避免挤爆解析队列）"));
+    host.appendChild(parseRow);
+    host.appendChild(
+      el(
+        "p",
+        "hint",
+        "解析阶段只生成下载计划：arXiv 直链优先 → 记录已有下载链接 → 现场联网补查；doi.org 一类落地页归「需人工」，不在自动下载之列。"
+      )
+    );
+    host.appendChild(
+      el(
+        "p",
+        "hint",
+        "红线：只从合法开放获取来源（arXiv／出版社 OA／机构仓库）自动下载，不访问任何需绕过的付费墙。下载件全部内容校验（%PDF＋%%EOF＋pdfinfo），坏文件不落盘、不留临时文件。"
+      )
+    );
+    return;
+  }
+  if (ftPhase === "scanning") {
+    primary.textContent = "解析中…";
+    primary.disabled = true;
+    const box = el("div", "lb-progress");
+    box.id = "ft-progress";
+    box.textContent = "已解析 " + ftDone + "/" + ftTotal + " …";
+    host.appendChild(box);
+    host.appendChild(el("p", "hint", "解析在后台进行，可关闭本对话框。"));
+    return;
+  }
+  if (ftPhase === "downloading") {
+    primary.textContent = "下载中…";
+    primary.disabled = true;
+    const box = el("div", "lb-progress");
+    box.id = "ft-progress";
+    box.textContent = "下载中 " + ftDone + "/" + ftTotal + " …";
+    host.appendChild(box);
+    host.appendChild(el("p", "hint", "逐条下载并校验；完成后自动登记与挂链。可关闭本对话框。"));
+    return;
+  }
+  if (ftPhase === "results") {
+    renderFetchResults(host);
+    return;
+  }
+  renderFetchReport(host);
+}
+
+function renderFetchResults(host) {
+  const plans = (ftScan && ftScan.plans) || [];
+  const stats = (ftScan && ftScan.stats) || {};
+  host.appendChild(
+    el(
+      "p",
+      "lb-stats",
+      "可直接下载 " + (stats.direct || 0) + " ｜ 需人工 " + (stats.manual || 0) + " ｜ 无 OA " +
+        (stats.none || 0) + " ｜ 目标目录：" + ftTarget
+    )
+  );
+  const direct = plans.filter((plan) => plan.expected === "direct");
+  const toolbar = el("div", "lb-toolbar");
+  toolbar.appendChild(
+    button("全选可下载", () => {
+      for (const plan of direct) ftChecked.add(plan.record_uuid);
+      renderFetch();
+    })
+  );
+  toolbar.appendChild(
+    button("全不选", () => {
+      ftChecked = new Set();
+      renderFetch();
+    })
+  );
+  toolbar.appendChild(
+    el("span", "hint", "勾选＝执行下载；「需人工／无 OA」条目留给后续的「待获取队列」或图书馆渠道。")
+  );
+  host.appendChild(toolbar);
+  const list = el("div", "lb-list");
+  for (const plan of plans) {
+    const row = el("div", "lb-row" + (plan.expected === "direct" ? "" : " ignored"));
+    if (plan.expected === "direct") {
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = ftChecked.has(plan.record_uuid);
+      box.addEventListener("change", () => {
+        if (box.checked) ftChecked.add(plan.record_uuid);
+        else ftChecked.delete(plan.record_uuid);
+        updateFetchPrimary();
+      });
+      row.appendChild(box);
+    }
+    const main = el("div", "lb-main");
+    main.appendChild(el("div", "lb-file", plan.title || plan.record_uuid));
+    const parts = [];
+    if (plan.year) parts.push(String(plan.year));
+    parts.push(plan.url || "（无链接）");
+    main.appendChild(el("div", "lb-target", parts.join(" · ")));
+    row.appendChild(main);
+    const labels = { direct: "可下载", manual: "需人工", none: "无 OA" };
+    const tierCls = { direct: "strong", manual: "suggest", none: "weak" };
+    row.appendChild(el("span", "lb-badge " + (tierCls[plan.expected] || "weak"), labels[plan.expected] || plan.expected));
+    const actions = el("div", "lb-actions");
+    if (plan.url) actions.appendChild(button("打开页面", () => openExternal(plan.url)));
+    row.appendChild(actions);
+    list.appendChild(row);
+  }
+  host.appendChild(list);
+  updateFetchPrimary();
+}
+
+function updateFetchPrimary() {
+  if (ftPhase !== "results") return;
+  const primary = byId("ft-primary");
+  const count = ftChecked.size;
+  primary.textContent = count ? "开始下载（" + count + "）" : "开始下载";
+  primary.disabled = count === 0;
+}
+
+function renderFetchReport(host) {
+  const primary = byId("ft-primary");
+  primary.textContent = "完成";
+  primary.disabled = false;
+  const stats = (ftReport && ftReport.stats) || {};
+  const items = (ftReport && ftReport.items) || [];
+  host.appendChild(
+    el(
+      "p",
+      "lb-stats",
+      "完成：成功 " + (stats.downloaded || 0) + " ｜ 需人工 " + (stats.manual || 0) + " ｜ 失败 " +
+        (stats.failed || 0) + " ｜ 跳过 " + (stats.skipped || 0) + "；成功件已登记并挂链，目标目录：" + ftTarget
+    )
+  );
+  const list = el("div", "lb-list");
+  const labels = {
+    downloaded: "成功",
+    html: "需人工",
+    blocked: "需人工",
+    "not-found": "未找到",
+    invalid: "校验不过",
+    "too-large": "过大",
+    failed: "失败",
+    "already-have": "跳过",
+    "missing-record": "跳过",
+  };
+  for (const item of items) {
+    const row = el("div", "lb-row");
+    const main = el("div", "lb-main");
+    main.appendChild(el("div", "lb-file", item.title || item.record_uuid));
+    const parts = [];
+    if (item.name) parts.push(item.name + "（" + formatBytes(item.size) + "）");
+    if (item.error) parts.push(item.error);
+    if (item.url) parts.push(item.url);
+    main.appendChild(el("div", "lb-target", parts.join(" · ")));
+    row.appendChild(main);
+    const cls =
+      item.status === "downloaded"
+        ? "strong"
+        : item.status === "html" || item.status === "blocked"
+        ? "suggest"
+        : "weak";
+    row.appendChild(el("span", "lb-badge " + cls, labels[item.status] || item.status));
+    list.appendChild(row);
+  }
+  host.appendChild(list);
+}
+
+async function startFetchScan() {
+  byId("ft-error").textContent = "";
+  const scopeNode = document.querySelector("input[name='ft-scope']:checked");
+  const scope = scopeNode ? scopeNode.value : "missing";
+  const parseNode = byId("ft-parse");
+  ftAutoParse = parseNode ? parseNode.checked : false;
+  const dirInput = byId("ft-dir");
+  const payload = { scope, target_dir: dirInput ? dirInput.value.trim() : "" };
+  if (scope === "selected") payload.uuids = Array.from(state.selection);
+  let started;
+  try {
+    started = await api("POST", "/api/fetch/scan", payload);
+  } catch (error) {
+    byId("ft-error").textContent = error.message;
+    return;
+  }
+  ftToken = started.token;
+  ftTarget = started.target_dir || "";
+  ftDone = 0;
+  ftTotal = started.total;
+  ftPhase = "scanning";
+  renderFetch();
+  pollFetch();
+}
+
+async function startFetchDownload() {
+  if (!ftScan) return;
+  const uuids = Array.from(ftChecked);
+  if (!uuids.length) return;
+  byId("ft-error").textContent = "";
+  let started;
+  try {
+    started = await api("POST", "/api/fetch/download", {
+      token: ftToken,
+      uuids,
+      auto_parse: ftAutoParse,
+    });
+  } catch (error) {
+    byId("ft-error").textContent = error.message;
+    return;
+  }
+  ftDone = 0;
+  ftTotal = started.total;
+  ftPhase = "downloading";
+  renderFetch();
+  pollFetch();
+}
+
+async function pollFetch() {
+  if (ftPolling) return;
+  ftPolling = true;
+  try {
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      let status;
+      try {
+        status = await api("POST", "/api/fetch/status", { token: ftToken });
+      } catch (error) {
+        byId("ft-error").textContent = error.message;
+        ftPhase = "options";
+        renderFetch();
+        return;
+      }
+      if (status.status === "running") {
+        ftDone = status.done;
+        ftTotal = status.total;
+        const box = byId("ft-progress");
+        if (box) {
+          box.textContent =
+            (status.phase === "scan" ? "已解析 " : "下载中 ") + status.done + "/" + status.total + " …";
+        }
+        continue;
+      }
+      if (status.status === "failed") {
+        byId("ft-error").textContent = "失败：" + status.error;
+        ftPhase = "options";
+        renderFetch();
+        return;
+      }
+      if (status.phase === "scan") {
+        ftScan = status.result || { plans: [], stats: {} };
+        ftChecked = new Set(
+          (ftScan.plans || [])
+            .filter((plan) => plan.expected === "direct")
+            .map((plan) => plan.record_uuid)
+        );
+        ftTarget = status.target_dir || ftTarget;
+        ftPhase = "results";
+        renderFetch();
+        showMessage(
+          "解析完成：可直接下载 " + ((ftScan.stats || {}).direct || 0) + " 条",
+          "info"
+        );
+        return;
+      }
+      ftReport = status.download || { items: [], stats: {} };
+      ftPhase = "report";
+      renderFetch();
+      await refreshFiles();
+      renderList();
+      renderDetail();
+      const st = ftReport.stats || {};
+      showMessage(
+        "下载完成：成功 " + (st.downloaded || 0) + " ｜ 需人工 " + (st.manual || 0) + " ｜ 失败 " +
+          (st.failed || 0),
+        "info"
+      );
+      return;
+    }
+  } finally {
+    ftPolling = false;
   }
 }
 
@@ -3176,6 +3568,12 @@ byId("lb-primary").addEventListener("click", () => {
 byId("lb-cancel").addEventListener("click", () => byId("linkbatch-dialog").classList.add("hidden"));
 byId("ea-ok").addEventListener("click", startEnrichAll);
 byId("ea-cancel").addEventListener("click", () => byId("enrich-all-dialog").classList.add("hidden"));
+byId("ft-primary").addEventListener("click", () => {
+  if (ftPhase === "options") startFetchScan();
+  else if (ftPhase === "results") startFetchDownload();
+  else if (ftPhase === "report") byId("fetch-dialog").classList.add("hidden");
+});
+byId("ft-cancel").addEventListener("click", () => byId("fetch-dialog").classList.add("hidden"));
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     hideRowMenu();
@@ -3193,6 +3591,7 @@ document.addEventListener("keydown", (event) => {
     byId("link-dialog").classList.add("hidden");
     byId("linkbatch-dialog").classList.add("hidden");
     byId("enrich-all-dialog").classList.add("hidden");
+    byId("fetch-dialog").classList.add("hidden");
     if (!byId("setup").classList.contains("hidden")) {
       byId("setup").classList.add("hidden");
       render();

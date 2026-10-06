@@ -1936,3 +1936,98 @@ def test_link_batch_online_upgrade(tmp_path):
         assert [item["uuid"] for item in result["missing"]] == [target_uuid]
     finally:
         server.close()
+
+
+def test_fetch_scan_and_download(tmp_path):
+    import time
+
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    service = S.LibraryService.initial(str(path))
+    service._fetch_check_pdfinfo = False  # 假 PDF 通不过 pdfinfo
+    service._web_lookup = [lambda title: []]  # 禁网：解析链只用记录自带链接
+
+    pdf_bytes = b"%PDF-1.4\n" + b"z" * 200 + b"\n%%EOF\n"
+
+    class _FakeResponse:
+        headers = {"Content-Type": "application/pdf"}
+
+        def __init__(self):
+            self._done = False
+
+        def read(self, size=-1):
+            if self._done:
+                return b""
+            self._done = True
+            return pdf_bytes
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    service._fetch_opener = lambda request, timeout=None: _FakeResponse()
+    server = _Server(service)
+    record_uuid = ""
+    try:
+        _, created = server.request(
+            "POST", "/api/records", {"title": "K2 mission characterization and early results"}
+        )
+        record_uuid = created["record"]["uuid"]
+        library = service.library
+        library.find(record_uuid).download_url = "https://example.org/k2.pdf"
+        service._persist(library, invalidate_scan=False)
+
+        target = tmp_path / "refs"
+        status, started = server.request(
+            "POST", "/api/fetch/scan", {"scope": "missing", "target_dir": str(target)}
+        )
+        assert status == 200 and started["started"] is True and started["total"] == 1
+        token = started["token"]
+        payload = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            _, payload = server.request("POST", "/api/fetch/status", {"token": token})
+            if payload["status"] != "running":
+                break
+            time.sleep(0.05)
+        assert payload["status"] == "done" and payload["phase"] == "scan"
+        assert payload["result"]["stats"] == {"direct": 1, "manual": 0, "none": 0}
+        plan = payload["result"]["plans"][0]
+        assert plan["record_uuid"] == record_uuid and plan["expected"] == "direct"
+        assert plan["url"] == "https://example.org/k2.pdf" and plan["source"] == "download-url"
+
+        status, started = server.request(
+            "POST", "/api/fetch/download", {"token": token, "uuids": [record_uuid]}
+        )
+        assert status == 200 and started["total"] == 1
+        payload = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            _, payload = server.request("POST", "/api/fetch/status", {"token": token})
+            if payload["status"] != "running":
+                break
+            time.sleep(0.05)
+        assert payload["status"] == "done" and payload["phase"] == "download"
+        stats = payload["download"]["stats"]
+        assert stats["downloaded"] == 1 and stats["failed"] == 0 and stats["skipped"] == 0
+        item = payload["download"]["items"][0]
+        assert item["status"] == "downloaded" and item["size"] == len(pdf_bytes)
+
+        saved = list(target.glob("*.pdf"))
+        assert len(saved) == 1 and saved[0].read_bytes() == pdf_bytes
+
+        status, files = server.request("GET", "/api/files")
+        entry = next(item for item in files["files"] if item["record_uuid"] == record_uuid)
+        assert entry["nature"] == "auto-download" and entry["status"] == "downloaded"
+        assert entry["exists"] is True and entry["md5"]
+        assert entry["name"] == saved[0].name
+    finally:
+        server.close()
+
+    reloaded = S.LibraryService.initial(str(path))
+    file_record = next(
+        item for item in reloaded.library.file_records if item.record_uuid == record_uuid
+    )
+    assert file_record.nature == "auto-download" and file_record.status == "downloaded"

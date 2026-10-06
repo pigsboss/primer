@@ -42,6 +42,7 @@ def test_natures_tuple_is_stable():
         "doi-consistent",
         "preprint-substitute",
         "title-match",
+        "auto-download",
         "manual-upload",
         "other",
     )

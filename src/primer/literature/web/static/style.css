@@ -416,3 +416,13 @@ td.coverage.none, td.coverage.unknown { color: #8c959f; }
 .lb-missing-file { color: var(--muted); font-size: 12px; }
 .lb-suspect { color: #9a6700; font-size: 12px; }
 #file-dialog { z-index: 70; }
+.ft-dir-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.ft-dir-row input {
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.st-downloaded { color: var(--accent); }

@@ -30,7 +30,14 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 # 本地文件性质的允许取值（界面徽章见《设计规格.md》§3.4）。
-NATURES = ("doi-consistent", "preprint-substitute", "title-match", "manual-upload", "other")
+NATURES = (
+    "doi-consistent",
+    "preprint-substitute",
+    "title-match",
+    "auto-download",
+    "manual-upload",
+    "other",
+)
 
 _DOI_PREFIXES = (
     "https://doi.org/",
@@ -55,7 +62,7 @@ _RECORD_KNOWN = frozenset((
 _FILE_KNOWN = frozenset(("path", "nature", "note"))
 
 # 本地文件记录（与文献记录同库共存，kind="file" 判别）的状态。
-FILE_STATUSES = ("pending", "parsing", "done", "failed")
+FILE_STATUSES = ("pending", "parsing", "done", "failed", "downloaded")
 _FILE_RECORD_KNOWN = frozenset((
     "kind", "uuid", "path", "name", "size", "md5", "status",
     "md_path", "doi", "eprint", "dup", "error",

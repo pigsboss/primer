@@ -46,6 +46,9 @@
     POST   /api/links/batch/status {token} 关联任务进度；完成后附提案清单＋缺文清单
     POST   /api/links/batch/apply  {pairs} 用户确认后把关联对批量落库（一次落盘）
     POST   /api/links/batch/export {kind: "missing"|"pairs", path} 把最近一轮结果导出为 CSV
+    POST   /api/fetch/scan        {scope: "missing"|"all"|"selected", uuids?, target_dir?} 启动原文下载解析（后台；只生成计划）
+    POST   /api/fetch/status      {token} 下载任务进度；解析完成附计划，下载完成附逐条结果
+    POST   /api/fetch/download    {token, uuids, auto_parse?} 对勾选的「可直接下载」条目执行下载（后台；校验后登记挂链）
     GET    /static/<rel>          静态资源（限包内 static/ 目录）
 
 错误响应统一为 ``{"error": <机器码>, "message": <英文>}``；状态码：校验 400、
@@ -169,12 +172,15 @@ class LibraryService:
         self.refines: dict[str, dict[str, Any]] = {}
         self.enrich_job: dict[str, Any] = {}
         self.link_job: dict[str, Any] = {}
+        self.fetch_job: dict[str, Any] = {}
         self.declared: list[str] = []
         self._chat_sender = chat_sender
         self._web_lookup = web_lookup
         self._parser = parser
         self._picker = picker
         self._doi_title_lookup: Optional[Callable[[str], str]] = None
+        self._fetch_opener: Optional[Callable] = None
+        self._fetch_check_pdfinfo = True
         self._parse_threads: list[threading.Thread] = []
         self._retiring: set[int] = set()
         self.load_error = ""
@@ -669,6 +675,310 @@ class LibraryService:
             writer.writerow(header)
             writer.writerows(rows)
         return {"exported": len(rows), "path": str(path)}
+
+    # ------------------------------------------------- 批量下载原文
+
+    def _default_fetch_dir(self, library: Library) -> Path:
+        """默认下载目录：现存已关联文件最集中的目录；没有则库文件旁的「下载」。"""
+        counts: dict[Path, int] = {}
+        for record in library.file_records:
+            try:
+                parent = self._resolve_source(library, record.path).parent
+            except OSError:
+                continue
+            counts[parent] = counts.get(parent, 0) + 1
+        if counts:
+            return max(counts, key=lambda key: counts[key])
+        return library.path.parent / "下载"
+
+    def start_fetch_scan(
+        self, scope: Any, uuids: Any = None, target_dir: Any = None
+    ) -> dict[str, Any]:
+        """启动「批量下载原文」的解析阶段（后台线程；只生成计划，不下载、不改库）。"""
+        if scope not in ("missing", "all", "selected"):
+            raise LibraryError(
+                f"unknown scope: {scope!r} (expected 'missing'/'all'/'selected')"
+            )
+        with self._lock:
+            library = self._require()
+            job = self.fetch_job
+            if job.get("status") == "running":
+                raise LibraryError("a fetch job is already running")
+            if scope == "selected":
+                if (
+                    not isinstance(uuids, list)
+                    or not uuids
+                    or not all(isinstance(item, str) for item in uuids)
+                ):
+                    raise LibraryError("uuids must be a non-empty list of strings")
+                wanted = set(uuids)
+                records = [record for record in library.records if record.uuid in wanted]
+            elif scope == "missing":
+                linked = {f.record_uuid for f in library.file_records if f.record_uuid}
+                records = [record for record in library.records if record.uuid not in linked]
+            else:
+                records = list(library.records)
+            if not records:
+                raise LibraryError("no records for the given scope")
+            if isinstance(target_dir, str) and target_dir.strip():
+                target = Path(target_dir.strip()).expanduser()
+                if not target.is_absolute():
+                    target = library.path.parent / target
+            else:
+                target = self._default_fetch_dir(library)
+            engines = self._build_engines()
+            token = str(_uuid.uuid4())
+            self.fetch_job = {
+                "token": token,
+                "scope": scope,
+                "phase": "scan",
+                "status": "running",
+                "done": 0,
+                "total": len(records),
+                "target_dir": str(target),
+                "result": None,
+                "download": None,
+                "error": "",
+            }
+            thread = threading.Thread(
+                target=self._run_fetch_scan, args=(token, records, engines), daemon=True
+            )
+        thread.start()
+        return {
+            "started": True,
+            "token": token,
+            "total": len(records),
+            "target_dir": str(target),
+        }
+
+    def fetch_status(self, token: Any) -> dict[str, Any]:
+        """下载任务进度；解析完成附 ``result``（计划清单），下载完成附 ``download``（逐条结果）。"""
+        if not isinstance(token, str) or not token:
+            raise LibraryError("fetch token is required")
+        with self._lock:
+            job = self.fetch_job
+            if not job or job.get("token") != token:
+                raise LibraryError(f"no fetch job for token: {token}")
+            payload = {
+                "status": job["status"],
+                "phase": job["phase"],
+                "scope": job["scope"],
+                "done": job["done"],
+                "total": job["total"],
+                "target_dir": job["target_dir"],
+            }
+            if job["status"] == "failed":
+                payload["error"] = job["error"]
+            if job.get("result") is not None:
+                payload["result"] = job["result"]
+            if job.get("download") is not None:
+                payload["download"] = job["download"]
+            return payload
+
+    def _run_fetch_scan(
+        self, token: str, records: list[Record], engines: list[Callable]
+    ) -> None:
+        """解析线程：逐条生成下载计划（不改库、不下载）。"""
+        from ..fetch import resolve_download_plan
+
+        job = self.fetch_job
+        if job.get("token") != token:
+            return
+        plans: list[dict[str, Any]] = []
+        stats = {"direct": 0, "manual": 0, "none": 0}
+        try:
+            for index, record in enumerate(records, start=1):
+                plan = resolve_download_plan(record, engines=engines)
+                plans.append(
+                    {
+                        "record_uuid": record.uuid,
+                        "title": record.title,
+                        "year": record.year,
+                        "doi": record.doi or "",
+                        "url": plan["url"],
+                        "source": plan["source"],
+                        "expected": plan["expected"],
+                        "reason": plan["reason"],
+                    }
+                )
+                stats[plan["expected"]] += 1
+                with self._lock:
+                    job["done"] = index
+        except Exception as exc:
+            with self._lock:
+                job["status"] = "failed"
+                job["error"] = str(exc)[:300] or type(exc).__name__
+            return
+        with self._lock:
+            job["result"] = {"plans": plans, "stats": stats}
+            job["done"] = job["total"]
+            job["status"] = "done"
+
+    def start_fetch_download(
+        self, token: Any, uuids: Any, auto_parse: Any = False
+    ) -> dict[str, Any]:
+        """进入下载阶段：只下载勾选且为「可直接下载」的条目；后台线程执行。"""
+        if not isinstance(token, str) or not token:
+            raise LibraryError("fetch token is required")
+        if (
+            not isinstance(uuids, list)
+            or not uuids
+            or not all(isinstance(item, str) for item in uuids)
+        ):
+            raise LibraryError("uuids must be a non-empty list of strings")
+        with self._lock:
+            job = self.fetch_job
+            if not job or job.get("token") != token:
+                raise LibraryError(f"no fetch job for token: {token}")
+            if job.get("phase") != "scan" or job.get("status") != "done":
+                raise LibraryError("fetch scan is not ready")
+            result = job.get("result") or {}
+            wanted = set(uuids)
+            plans = [
+                plan
+                for plan in (result.get("plans") or [])
+                if plan["record_uuid"] in wanted and plan["expected"] == "direct"
+            ]
+            if not plans:
+                raise LibraryError("no downloadable items in the selection")
+            job["phase"] = "download"
+            job["status"] = "running"
+            job["done"] = 0
+            job["total"] = len(plans)
+            job["download"] = None
+            target = Path(job["target_dir"])
+            auto = bool(auto_parse)
+            opener = self._fetch_opener
+            check_pdfinfo = self._fetch_check_pdfinfo
+            thread = threading.Thread(
+                target=self._run_fetch_download,
+                args=(token, plans, target, auto, opener, check_pdfinfo),
+                daemon=True,
+            )
+        thread.start()
+        return {"started": True, "total": len(plans), "target_dir": str(target)}
+
+    def _run_fetch_download(
+        self,
+        token: str,
+        plans: list[dict[str, Any]],
+        target_dir: Path,
+        auto_parse: bool,
+        opener: Optional[Callable],
+        check_pdfinfo: bool,
+    ) -> None:
+        """下载线程：逐条下载→校验→登记→挂链；每 5 条落盘一次，结束再落盘一次。"""
+        from ..fetch import HostThrottle, download_pdf, safe_filename, unique_path
+
+        job = self.fetch_job
+        if job.get("token") != token:
+            return
+        linked_snapshot: set[str] = set()
+        with self._lock:
+            library = self.library
+            if library is not None:
+                linked_snapshot = {f.record_uuid for f in library.file_records if f.record_uuid}
+        items: list[dict[str, Any]] = []
+        counts = {"downloaded": 0, "manual": 0, "failed": 0, "skipped": 0}
+        pending_persist = 0
+        try:
+            throttle = HostThrottle(0.0 if opener is not None else 1.0)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for index, plan in enumerate(plans, start=1):
+                record_uuid = plan["record_uuid"]
+                item: dict[str, Any] = {
+                    "record_uuid": record_uuid,
+                    "title": plan.get("title", ""),
+                    "url": plan.get("url", ""),
+                    "status": "",
+                    "error": "",
+                    "name": "",
+                    "size": 0,
+                }
+                with self._lock:
+                    library = self.library
+                    record = library.find(record_uuid) if library is not None else None
+                if record is None:
+                    item.update(status="missing-record", error="记录已不存在")
+                    counts["failed"] += 1
+                elif record_uuid in linked_snapshot:
+                    item.update(status="already-have", error="已有本地文件")
+                    counts["skipped"] += 1
+                else:
+                    dest = unique_path(target_dir, safe_filename(record.title, record.year))
+                    outcome: dict[str, Any] = {}
+                    for attempt in range(2):
+                        throttle.wait(plan.get("url", ""))
+                        outcome = download_pdf(
+                            plan.get("url", ""),
+                            dest,
+                            opener=opener,
+                            check_pdfinfo=check_pdfinfo,
+                        )
+                        if outcome.get("ok") or outcome.get("status") != "failed":
+                            break
+                        time.sleep(1.0)
+                    status = str(outcome.get("status", "failed"))
+                    if outcome.get("ok"):
+                        with self._lock:
+                            library = self.library
+                            record = library.find(record_uuid) if library is not None else None
+                            if library is None or record is None:
+                                item.update(status="failed", error="库已切换")
+                                counts["failed"] += 1
+                            else:
+                                file_record = library.add_file_record(
+                                    {
+                                        "path": self._stored_path(library, dest),
+                                        "name": dest.name,
+                                        "size": int(outcome.get("size") or 0),
+                                        "md5": self._file_md5(dest),
+                                        "status": "pending" if auto_parse else "downloaded",
+                                    }
+                                )
+                                file_record.record_uuid = record.uuid
+                                file_record.nature = "auto-download"
+                                file_record.updated_at = now_iso()
+                                linked_snapshot.add(record_uuid)
+                                pending_persist += 1
+                                item.update(
+                                    status="downloaded",
+                                    name=dest.name,
+                                    size=outcome.get("size") or 0,
+                                )
+                                counts["downloaded"] += 1
+                                if pending_persist >= 5:
+                                    try:
+                                        self._persist(library, invalidate_scan=False)
+                                        pending_persist = 0
+                                    except LibraryError:
+                                        pass
+                    else:
+                        item.update(status=status, error=str(outcome.get("error") or ""))
+                        if status in ("html", "blocked"):
+                            counts["manual"] += 1
+                        else:
+                            counts["failed"] += 1
+                items.append(item)
+                with self._lock:
+                    job["done"] = index
+        except Exception as exc:
+            with self._lock:
+                job["status"] = "failed"
+                job["error"] = str(exc)[:300] or type(exc).__name__
+        finally:
+            with self._lock:
+                library = self.library
+                if library is not None and pending_persist:
+                    try:
+                        self._persist(library, invalidate_scan=False)
+                    except LibraryError:
+                        pass
+                job["download"] = {"items": items, "stats": counts}
+                if job.get("status") == "running":
+                    job["status"] = "done"
+        if auto_parse and counts["downloaded"]:
+            self._ensure_parse_worker()
 
     def bulk_update_records(self, uuids: Any, fields: Any) -> dict[str, Any]:
         """把 ``fields`` 合并进选中记录（只改给定字段）；返回更新条数。"""
@@ -2300,6 +2610,24 @@ def make_handler(service: LibraryService):
                     return self._send_json(
                         200,
                         service.export_link_batch(payload.get("kind"), payload.get("path")),
+                    )
+                if path == "/api/fetch/scan":
+                    return self._send_json(
+                        200,
+                        service.start_fetch_scan(
+                            payload.get("scope"), payload.get("uuids"), payload.get("target_dir")
+                        ),
+                    )
+                if path == "/api/fetch/status":
+                    return self._send_json(200, service.fetch_status(payload.get("token")))
+                if path == "/api/fetch/download":
+                    return self._send_json(
+                        200,
+                        service.start_fetch_download(
+                            payload.get("token"),
+                            payload.get("uuids"),
+                            payload.get("auto_parse", False),
+                        ),
                     )
                 if path == "/api/records/bulk-update":
                     return self._send_json(

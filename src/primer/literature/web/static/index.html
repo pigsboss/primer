@@ -19,6 +19,7 @@
         <div class="dropdown-item" data-action="scan-folder">扫描文件夹…</div>
         <div class="dropdown-item" data-action="add-files">添加本地文件…</div>
         <div class="dropdown-item" data-action="auto-link">自动关联…</div>
+        <div class="dropdown-item" data-action="fetch-papers">批量下载原文…</div>
         <div class="dropdown-item" data-action="export">导出…</div>
       </div>
     </div>
@@ -305,6 +306,18 @@
       <div class="dialog-buttons">
         <button id="ea-cancel">取消</button>
         <button id="ea-ok" class="primary">开始</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="fetch-dialog" class="modal hidden">
+    <div class="dialog wide">
+      <h2>批量下载原文</h2>
+      <div id="ft-body"></div>
+      <p id="ft-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button id="ft-cancel">关闭</button>
+        <button id="ft-primary" class="primary">开始解析</button>
       </div>
     </div>
   </div>
