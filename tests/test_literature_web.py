@@ -2286,3 +2286,50 @@ def test_projects_import_md_endpoint(tmp_path):
 
     reloaded = S.LibraryService.initial(str(path))
     assert reloaded.library.find(friction_uuid).projects == ["地震前兆探测"]
+
+
+def test_projects_import_md_accepts_paths_list(tmp_path):
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    service = S.LibraryService.initial(str(path))
+    a = tmp_path / "a.md"
+    a.write_text(
+        "## M 地震前兆探测专题（编号 558–）\n[1] First paper. Journal, 2020.\n",
+        encoding="utf-8",
+    )
+    folder = tmp_path / "lists"
+    folder.mkdir()
+    (folder / "b.md").write_text(
+        "### N 风暴海啸预报专题（编号 629–）\n[2] Second paper. Ocean Modelling, 2021.\n",
+        encoding="utf-8",
+    )
+    server = _Server(service)
+    try:
+        first = second = ""
+        for title, note in [
+            ("First", "原始记录：First paper. Journal, 2020."),
+            ("Second", "原始记录：Second paper. Ocean Modelling, 2021."),
+        ]:
+            status, created = server.request("POST", "/api/records", {"title": title, "notes": note})
+            assert status == 201
+            if title == "First":
+                first = created["record"]["uuid"]
+            else:
+                second = created["record"]["uuid"]
+
+        status, data = server.request(
+            "POST", "/api/projects/import-md", {"paths": [str(a), str(folder)]}
+        )
+        assert status == 200
+        assert data["files"] == [str(a), str(folder / "b.md")]
+        assert data["stats"]["matched"] == 2
+        by_project = {group["project"]: group for group in data["groups"]}
+        assert by_project["地震前兆探测"]["uuids"] == [first]
+        assert by_project["风暴海啸预报"]["uuids"] == [second]
+
+        status, err = server.request(
+            "POST", "/api/projects/import-md", {"paths": [str(tmp_path / "none.md")]}
+        )
+        assert status == 400 and "not found" in err["message"]
+    finally:
+        server.close()

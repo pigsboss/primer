@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """mdlist：标题清洗、条目解析、匹配（精确／前缀回退）与项目分组。"""
 
+import pytest
+
 from primer.literature.library import Record
 from primer.literature.mdlist import clean_heading, parse_md_entries, propose_projects_from_md
 
@@ -78,3 +80,43 @@ def test_propose_projects_respects_unmatched_limit(tmp_path):
     records = [_record(f"r{i}", f"t{i}", f"原始记录：对不上 {i}") for i in range(5)]
     stats, groups, unmatched = propose_projects_from_md(records, path, unmatched_limit=2)
     assert not groups and stats["unmatched"] == 5 and len(unmatched) == 2
+
+
+def test_propose_projects_merges_multiple_files_and_dirs(tmp_path):
+    a = tmp_path / "a.md"
+    a.write_text(
+        "## M 地震前兆探测专题（编号 558–）\n"
+        "[558] Friction of rocks. Pure and Applied Geophysics, 1978.\n",
+        encoding="utf-8",
+    )
+    sub = tmp_path / "lists"
+    sub.mkdir()
+    (sub / "b.md").write_text(
+        "## N 风暴海啸预报专题（编号 629–）\n"
+        "[629] Storm surge paper. Ocean Modelling, 2019.\n",
+        encoding="utf-8",
+    )
+    (sub / "c.md").write_text(
+        "### M 地震前兆探测专题（编号 558–）\n"
+        "[560] Second seismic paper. Tectonophysics, 2020.\n",
+        encoding="utf-8",
+    )
+    records = [
+        _record("r1", "t1", "原始记录：Friction of rocks. Pure and Applied Geophysics, 1978."),
+        _record("r2", "t2", "原始记录：Storm surge paper. Ocean Modelling, 2019."),
+        _record("r3", "t3", "原始记录：Second seismic paper. Tectonophysics, 2020."),
+    ]
+    stats, groups, unmatched = propose_projects_from_md(records, [a, sub])
+    assert stats["files"] == [str(a), str(sub / "b.md"), str(sub / "c.md")]
+    assert stats["matched"] == 3 and not unmatched
+    by_project = {group["project"]: group for group in groups}
+    assert by_project["地震前兆探测"]["uuids"] == ["r1", "r3"]
+    assert by_project["风暴海啸预报"]["uuids"] == ["r2"]
+
+    with pytest.raises(ValueError):
+        propose_projects_from_md(records, [tmp_path / "missing.md"])
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(ValueError):
+        propose_projects_from_md(records, empty)

@@ -3047,7 +3047,6 @@ async function pollProjectInfer() {
 // ------------------------------------------------ 从清单 md 导入项目（标题层级恢复）
 
 let mpPhase = "pick"; // pick | loading | results
-let mpFile = "";
 let mpData = null;
 let mpChecked = new Set();
 
@@ -3067,13 +3066,13 @@ function renderMdProjects() {
   host.textContent = "";
   const primary = byId("mp-primary");
   if (mpPhase === "pick") {
-    primary.textContent = "选择清单 md…";
+    primary.textContent = "选择 md 文件…";
     primary.disabled = false;
     host.appendChild(
       el(
         "p",
         "hint",
-        "选一份 md 文献清单（如《行星探测三十年综述_参考文献.md》总库）：解析「#～####」标题层级，把库内记录按条目行文本匹配回标题（精确优先，长前缀一致时回退）。"
+        "可选多份 md 文献清单（如《行星探测三十年综述_参考文献.md》总库）：解析「#～####」标题层级，把库内记录按条目行文本匹配回标题（精确优先，长前缀一致时回退）。"
       )
     );
     host.appendChild(
@@ -3083,6 +3082,9 @@ function renderMdProjects() {
         "预览按标题分组（项目名＋条数，默认勾选含「专题」的标题）；应用时把各组记录挂入对应项目，已有项目不动。"
       )
     );
+    const pickRow = el("div", "lb-toolbar");
+    pickRow.appendChild(button("选择文件夹（导入其中全部 md）…", pickMdFolder));
+    host.appendChild(pickRow);
     return;
   }
   if (mpPhase === "loading") {
@@ -3098,12 +3100,15 @@ function renderMdProjectsResults(host) {
   const stats = (mpData && mpData.stats) || {};
   const groups = (mpData && mpData.groups) || [];
   const unmatched = (mpData && mpData.unmatched) || [];
-  const fileName = mpData && mpData.file ? mpData.file.split("/").pop() : "";
+  const files = (mpData && mpData.files) || [];
+  const names = files.map((item) => String(item).split("/").pop());
+  const shown =
+    names.length > 3 ? names.slice(0, 3).join("、") + " 等 " + names.length + " 份" : names.join("、");
   host.appendChild(
     el(
       "p",
       "lb-stats",
-      "清单：" + fileName + " ｜ 条目 " + (stats.entries || 0) + " ｜ 匹配 " + (stats.matched || 0) +
+      "清单：" + shown + " ｜ 条目 " + (stats.entries || 0) + " ｜ 匹配 " + (stats.matched || 0) +
         "（精确 " + (stats.exact || 0) + "＋前缀 " + (stats.prefix || 0) + "）｜ 未匹配 " +
         (stats.unmatched || 0) + " ｜ 项目组 " + (stats.projects || 0)
     )
@@ -3113,7 +3118,6 @@ function renderMdProjectsResults(host) {
     button("重选清单…", () => {
       mpPhase = "pick";
       mpData = null;
-      mpFile = "";
       mpChecked = new Set();
       renderMdProjects();
     })
@@ -3176,21 +3180,31 @@ function updateMdProjectsPrimary() {
 }
 
 async function pickMdList() {
+  const picked = await pickPaths({ kind: "files" });
+  if (picked && (picked.paths || []).length) await loadMdFiles(picked.paths);
+}
+
+async function pickMdFolder() {
+  const picked = await pickPaths({ kind: "folder" });
+  if (picked && (picked.paths || []).length) await loadMdFiles(picked.paths);
+}
+
+async function pickPaths(payload) {
   byId("mp-error").textContent = "";
-  let picked;
   try {
-    picked = await api("POST", "/api/files/pick", { kind: "files" });
+    return await api("POST", "/api/files/pick", payload);
   } catch (error) {
     byId("mp-error").textContent = error.message;
-    return;
+    return null;
   }
-  if (picked.canceled || !(picked.paths || [])[0]) return;
-  mpFile = picked.paths[0];
+}
+
+async function loadMdFiles(paths) {
   mpPhase = "loading";
   renderMdProjects();
   let data;
   try {
-    data = await api("POST", "/api/projects/import-md", { path: mpFile });
+    data = await api("POST", "/api/projects/import-md", { paths });
   } catch (error) {
     byId("mp-error").textContent = error.message;
     mpPhase = "pick";

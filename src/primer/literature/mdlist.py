@@ -7,6 +7,7 @@
 
 * :func:`parse_md_entries`：逐行扫描，记下「最近标题 → 条目行文本」；
 * :func:`clean_heading`：标题 → 项目名（去括注／＝装饰／前导编号，去尾部「专题」）；
+* :func:`resolve_md_files`：把「文件或目录」清单解析为 md 文件列表（目录取其下全部 ``*.md``）；
 * :func:`propose_projects_from_md`：把库内记录与条目行匹配（规范化文本；精确优先，
   40 字以上前缀一致时回退），按项目分组返回（只计算、不改库）。
 """
@@ -17,7 +18,13 @@ import re
 from pathlib import Path
 from typing import Any, Sequence
 
-__all__ = ["clean_heading", "normalize_line", "parse_md_entries", "propose_projects_from_md"]
+__all__ = [
+    "clean_heading",
+    "normalize_line",
+    "parse_md_entries",
+    "propose_projects_from_md",
+    "resolve_md_files",
+]
 
 _NUMBER = re.compile(r"^\[\d+[a-z]?\]\s*")
 _ORIGIN = re.compile(r"［[^］]*］")
@@ -46,43 +53,75 @@ def clean_heading(heading: Any) -> str:
     return text
 
 
-def parse_md_entries(path: str | Path) -> list[dict[str, str]]:
-    """扫描清单 md：返回 ``[{heading, project, key}]``（跳空行／标题行／非条目行）。
+def resolve_md_files(paths: str | Path | Sequence[str | Path]) -> list[Path]:
+    """把「文件或目录」清单解析为 md 文件列表：目录取其下全部 ``*.md``（按名排序）。"""
+    if isinstance(paths, (str, Path)):
+        items: list[Any] = [paths]
+    else:
+        items = list(paths)
+    files: list[Path] = []
+    for item in items:
+        if not isinstance(item, (str, Path)) or not str(item).strip():
+            raise ValueError("md list path must be a non-empty string")
+        target = Path(str(item).strip()).expanduser()
+        if target.is_dir():
+            files.extend(sorted(target.glob("*.md")))
+        elif target.is_file():
+            files.append(target)
+        else:
+            raise ValueError(f"md list not found: {target}")
+    if not files:
+        raise ValueError("no .md files found in the selection")
+    return files
 
-    条目行＝以 ``[编号]``（如 ``[558]``、``[572a]``）开头的行；``key`` 为规范化文本。
+
+def parse_md_entries(paths: str | Path | Sequence[str | Path]) -> list[dict[str, str]]:
+    """扫描一份或多份清单 md：返回 ``[{heading, project, key}]``（跳空行／标题行／非条目行）。
+
+    条目行＝以 ``[编号]``（如 ``[558]``、``[572a]``）开头的行；``key`` 为规范化文本；
+    标题层级按文件各自独立（跨文件不继承）。
     """
     entries: list[dict[str, str]] = []
-    heading = ""
-    for raw in Path(path).read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        match = _HEADING.match(line)
-        if match:
-            heading = match.group(1).strip()
-            continue
-        if not _NUMBER.match(line):
-            continue
-        key = normalize_line(line)
-        project = clean_heading(heading)
-        if key and project:
-            entries.append({"heading": heading, "project": project, "key": key})
+    for path in resolve_md_files(paths):
+        heading = ""
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            match = _HEADING.match(line)
+            if match:
+                heading = match.group(1).strip()
+                continue
+            if not _NUMBER.match(line):
+                continue
+            key = normalize_line(line)
+            project = clean_heading(heading)
+            if key and project:
+                entries.append({"heading": heading, "project": project, "key": key})
     return entries
 
 
 def propose_projects_from_md(
-    records: Sequence[Any], path: str | Path, *, unmatched_limit: int = 100
-) -> tuple[dict[str, int], list[dict[str, Any]], list[dict[str, str]]]:
+    records: Sequence[Any],
+    paths: str | Path | Sequence[str | Path],
+    *,
+    unmatched_limit: int = 100,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, str]]]:
     """把记录匹配回清单条目并按项目分组（纯计算，不改库）。
 
     匹配：规范化文本精确相等优先；否则找 40 字以上前缀一致、长度差最小的条目
-    （同一行可能出现在多个标题下，全部计入）。返回 ``(stats, groups, unmatched)``：
+    （同一行可能出现在多个标题下，全部计入）。``paths`` 可给一份／多份 md 文件或
+    目录（目录取其下全部 ``*.md``），条目合并后统一匹配。返回 ``(stats, groups, unmatched)``：
 
-    * ``stats``：``entries``／``projects``／``matched``／``exact``／``prefix``／``unmatched``；
+    * ``stats``：``files``（文件列表）／``entries``／``projects``／``matched``／
+      ``exact``／``prefix``／``unmatched``；
     * ``groups``：``[{"project", "heading", "count", "uuids"}]``，按条数降序；
     * ``unmatched``：前 ``unmatched_limit`` 条未命中记录 ``{uuid, title, note}``。
     """
-    entries = parse_md_entries(path)
+    files = resolve_md_files(paths)
+    entries = parse_md_entries(files)
+    if not entries:
+        raise ValueError("no entries found ([编号] rows) in the md list(s)")
     exact: dict[str, list[str]] = {}
     for entry in entries:
         names = exact.setdefault(entry["key"], [])
@@ -113,7 +152,15 @@ def propose_projects_from_md(
                 best.append(entry["project"])
         return best, ("prefix" if best else "")
 
-    stats = {"entries": len(entries), "exact": 0, "prefix": 0, "matched": 0, "unmatched": 0, "projects": 0}
+    stats = {
+        "files": [str(path) for path in files],
+        "entries": len(entries),
+        "exact": 0,
+        "prefix": 0,
+        "matched": 0,
+        "unmatched": 0,
+        "projects": 0,
+    }
     grouped: dict[str, list[str]] = {}
     unmatched: list[dict[str, str]] = []
     for record in records:

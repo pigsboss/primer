@@ -1097,20 +1097,21 @@ class LibraryService:
             job["done"] = job["total"]
             job["status"] = "done"
 
-    def import_md_projects(self, path_text: Any) -> dict[str, Any]:
-        """从 md 文献清单恢复项目归属：解析标题层级＋匹配条目行；只预演，不改库。"""
-        if not isinstance(path_text, str) or not path_text.strip():
+    def import_md_projects(self, paths_any: Any) -> dict[str, Any]:
+        """从一份或多份 md 文献清单恢复项目归属（目录取其中全部 *.md）；只预演，不改库。"""
+        if not isinstance(paths_any, (str, Path, list)):
             raise LibraryError("md list path is required")
-        target = Path(path_text.strip()).expanduser()
-        if not target.is_file():
-            raise LibraryError(f"md list not found: {target}")
         from ..mdlist import propose_projects_from_md
 
         with self._lock:
             library = self._require()
             records = list(library.records)
-        stats, groups, unmatched = propose_projects_from_md(records, target)
-        return {"file": str(target), "stats": stats, "groups": groups, "unmatched": unmatched}
+        try:
+            stats, groups, unmatched = propose_projects_from_md(records, paths_any)
+        except ValueError as exc:
+            raise LibraryError(str(exc))
+        files = stats.pop("files", [])
+        return {"files": files, "stats": stats, "groups": groups, "unmatched": unmatched}
 
     def bulk_update_records(self, uuids: Any, fields: Any) -> dict[str, Any]:
         """把 ``fields`` 合并进选中记录（只改给定字段）；返回更新条数。"""
@@ -2828,7 +2829,9 @@ def make_handler(service: LibraryService):
                 if path == "/api/projects/infer/status":
                     return self._send_json(200, service.project_infer_status(payload.get("token")))
                 if path == "/api/projects/import-md":
-                    return self._send_json(200, service.import_md_projects(payload.get("path")))
+                    return self._send_json(
+                        200, service.import_md_projects(payload.get("paths", payload.get("path")))
+                    )
                 if path == "/api/scan":
                     return self._send_json(200, {"scan": service.scan_files()})
                 if path == "/api/open":
