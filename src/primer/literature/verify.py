@@ -100,7 +100,10 @@ def _openalex_title_search(title: str, *, api_key: str) -> list[dict[str, Any]]:
     params = {
         "search": title,
         "per-page": 5,
-        "select": "title,doi,publication_year,authorships,primary_location,type,biblio",
+        "select": (
+            "title,doi,publication_year,authorships,primary_location,type,biblio,"
+            "open_access,best_oa_location,locations"
+        ),
     }
     if api_key:
         params["api_key"] = api_key
@@ -111,30 +114,56 @@ def _openalex_title_search(title: str, *, api_key: str) -> list[dict[str, Any]]:
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
         payload = json.loads(response.read().decode("utf-8"))
     time.sleep(PAUSE_SECONDS)
-    candidates: list[dict[str, Any]] = []
-    for work in payload.get("results") or []:
-        location = work.get("primary_location") or {}
-        source = location.get("source") or {}
-        biblio = work.get("biblio") or {}
-        first_page = str(biblio.get("first_page") or "").strip()
-        last_page = str(biblio.get("last_page") or "").strip()
-        pages = f"{first_page}-{last_page}" if first_page and last_page else (first_page or None)
-        doi = str(work.get("doi") or "").replace("https://doi.org/", "").lower()
-        candidates.append({
-            "title": re.sub(r"\s+", " ", str(work.get("title") or "")).strip(),
-            "doi": doi or None,
-            "year": work.get("publication_year"),
-            "authors": [
-                str((author.get("author") or {}).get("display_name") or "").strip()
-                for author in (work.get("authorships") or [])
-            ],
-            "venue": str((source or {}).get("display_name") or "").strip() or None,
-            "type": TYPE_MAP.get(str(work.get("type") or ""), "other"),
-            "volume": str(biblio.get("volume") or "").strip() or None,
-            "number": str(biblio.get("issue") or "").strip() or None,
-            "pages": pages,
-        })
-    return candidates
+    return [_openalex_work(work) for work in payload.get("results") or []]
+
+
+def _openalex_work(work: Any) -> dict[str, Any]:
+    """把一篇 OpenAlex work 映射为规范化候选（纯映射，供单测）。"""
+    work = work if isinstance(work, dict) else {}
+    location = work.get("primary_location") or {}
+    source = location.get("source") or {}
+    biblio = work.get("biblio") or {}
+    first_page = str(biblio.get("first_page") or "").strip()
+    last_page = str(biblio.get("last_page") or "").strip()
+    pages = f"{first_page}-{last_page}" if first_page and last_page else (first_page or None)
+    doi = str(work.get("doi") or "").replace("https://doi.org/", "").lower()
+    open_access = work.get("open_access") or {}
+    best_oa = work.get("best_oa_location") or {}
+    arxiv_pdfs: list[str] = []
+    other_pdfs: list[str] = []
+    for loc in work.get("locations") or []:
+        if not isinstance(loc, dict) or not loc.get("is_oa"):
+            continue
+        pdf = str(loc.get("pdf_url") or "").strip()
+        if not pdf:
+            continue
+        (arxiv_pdfs if "arxiv.org" in pdf.lower() else other_pdfs).append(pdf)
+    best_pdf = str(best_oa.get("pdf_url") or "").strip()
+    ordered = (
+        arxiv_pdfs
+        + ([best_pdf] if best_pdf else [])
+        + other_pdfs
+        + [
+            str(open_access.get("oa_url") or "").strip(),
+            str(best_oa.get("landing_page_url") or "").strip(),
+        ]
+    )
+    download_url = next((url for url in ordered if url), None)
+    return {
+        "title": re.sub(r"\s+", " ", str(work.get("title") or "")).strip(),
+        "doi": doi or None,
+        "year": work.get("publication_year"),
+        "authors": [
+            str((author.get("author") or {}).get("display_name") or "").strip()
+            for author in (work.get("authorships") or [])
+        ],
+        "venue": str((source or {}).get("display_name") or "").strip() or None,
+        "type": TYPE_MAP.get(str(work.get("type") or ""), "other"),
+        "volume": str(biblio.get("volume") or "").strip() or None,
+        "number": str(biblio.get("issue") or "").strip() or None,
+        "pages": pages,
+        "download_url": download_url,
+    }
 
 
 def verify_source(

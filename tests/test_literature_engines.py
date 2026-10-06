@@ -37,6 +37,29 @@ def test_ads_doc_maps_fields():
     assert eprint["year"] is None and eprint["doi"] is None and eprint["venue"] is None
 
 
+def test_ads_doc_arxiv_eprint_and_links_data():
+    from primer.literature.engines import _ads_doc
+
+    doc = _ads_doc({
+        "title": ["Seven temperate terrestrial planets"],
+        "identifier": ["2017Natur.542..456G", "arXiv:1703.01424", "10.1038/nature21360"],
+        "links_data": ['{"type": "simbad", "url": "https://simbad.u-strasbg.fr/x"}'],
+    })
+    assert doc["eprint"] == "1703.01424"
+    assert doc["download_url"] == "https://arxiv.org/pdf/1703.01424"
+
+    pdf_only = _ads_doc({
+        "title": ["Something"],
+        "identifier": ["2013HEAD...1330201D"],
+        "links_data": ['not json', '{"type": "esource", "url": "https://example.org/a.pdf"}'],
+    })
+    assert pdf_only["eprint"] is None
+    assert pdf_only["download_url"] == "https://example.org/a.pdf"
+
+    none_at_all = _ads_doc({"title": ["Nothing here"]})
+    assert none_at_all["download_url"] is None and none_at_all["eprint"] is None
+
+
 def test_crossref_item_maps_biblatex_fields():
     from primer.literature.engines import _crossref_item
 
@@ -66,6 +89,22 @@ def test_crossref_item_maps_biblatex_fields():
     assert candidate["eventtitle"] == "AAAS Meeting" and candidate["location"] == "San Diego"
     assert candidate["institution"] == "NASA"
     assert candidate["publisher"] == "AAAS"
+
+
+def test_crossref_item_pdf_link():
+    from primer.literature.engines import _crossref_item
+
+    item = _crossref_item({
+        "DOI": "10.1/x",
+        "title": ["T"],
+        "link": [
+            {"content-type": "text/html", "URL": "https://x/landing"},
+            {"content-type": "application/pdf", "URL": "https://x/paper.pdf"},
+        ],
+    })
+    assert item["download_url"] == "https://x/paper.pdf"
+    bare = _crossref_item({"DOI": "10.1/y", "title": ["U"], "link": ["oops"]})
+    assert bare["download_url"] is None
 
 
 def test_clean_title_strips_markup_and_entities():

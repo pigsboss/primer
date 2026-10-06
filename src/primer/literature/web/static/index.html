@@ -27,6 +27,7 @@
       <div id="edit-menu" class="dropdown hidden">
         <div class="dropdown-item" data-action="lookup">联网查询（补全／修正字段）</div>
         <div class="dropdown-item" data-action="ai">AI 解析（补全／修正字段）</div>
+        <div class="dropdown-item" data-action="enrich-all">全集联网比对…</div>
         <div class="dropdown-item" data-action="edit-fields">编辑字段…</div>
         <div class="dropdown-item" data-action="add-to-project">加入项目…</div>
         <div class="dropdown-item" data-action="delete">删除选中记录</div>
@@ -242,6 +243,7 @@
         <label class="field" data-field="venue">来源（期刊名／文集名／出版社）<input id="ed-venue" type="text"></label>
         <label class="field" data-field="doi">DOI<input id="ed-doi" type="text" spellcheck="false"></label>
         <label class="field" data-field="url">链接 URL<input id="ed-url" type="text" spellcheck="false"></label>
+        <label class="field" data-field="download_url">原文下载链接<input id="ed-download_url" type="text" spellcheck="false"></label>
         <label class="field" data-field="volume">卷<input id="ed-volume" type="text"></label>
         <label class="field" data-field="number">期号／编号<input id="ed-number" type="text"></label>
         <label class="field" data-field="pages">页码<input id="ed-pages" type="text"></label>
@@ -289,6 +291,20 @@
       <div class="dialog-buttons">
         <button id="lb-cancel">关闭</button>
         <button id="lb-primary" class="primary">开始匹配</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="enrich-all-dialog" class="modal hidden">
+    <div class="dialog">
+      <h2>全集联网比对</h2>
+      <p class="hint">逐条访问学术引擎链（OpenAlex → NASA ADS → Crossref）：补充缺失字段、修正错误字段，并探测原文下载链接（OA 直链 → arXiv PDF → DOI 页）。完成后弹「变更预览」，点「应用」才写入。</p>
+      <div class="radio-row" id="ea-scopes"></div>
+      <p class="hint">逐条约 1–2 秒；期间可关闭对话框，任务在后台继续。</p>
+      <p id="ea-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button id="ea-cancel">取消</button>
+        <button id="ea-ok" class="primary">开始</button>
       </div>
     </div>
   </div>

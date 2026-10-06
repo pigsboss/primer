@@ -25,7 +25,7 @@ const TYPE_LABELS = {
 };
 
 // 编辑器：通用字段（全类型显示）＋各类型专属字段（biblatex 规范名）。
-const COMMON_FIELDS = new Set(["title", "authors", "year", "type", "doi", "url", "keywords", "notes"]);
+const COMMON_FIELDS = new Set(["title", "authors", "year", "type", "doi", "url", "download_url", "keywords", "notes"]);
 const TYPE_FIELDS = {
   "journal-article": ["venue", "volume", "number", "pages", "eid", "issn"],
   "conference-paper": ["venue", "eventtitle", "eventdate", "organization", "location", "publisher", "volume", "pages", "editor", "series", "isbn"],
@@ -40,7 +40,7 @@ const TYPE_FIELDS = {
 const TEXT_FIELDS = [
   "volume", "number", "pages", "eid", "publisher", "location", "institution",
   "organization", "series", "edition", "isbn", "issn", "url", "eprint",
-  "eventtitle", "eventdate", "keywords",
+  "eventtitle", "eventdate", "keywords", "download_url",
 ];
 
 const state = {
@@ -996,6 +996,18 @@ function renderDetail() {
   doiRow.appendChild(el("span", "detail-value", record.doi || "—"));
   host.appendChild(doiRow);
 
+  const dlRow = el("div", "detail-row");
+  dlRow.appendChild(el("span", "detail-label", "下载链接"));
+  if (record.download_url) {
+    const linkNode = el("span", "detail-value mono link-like", record.download_url);
+    linkNode.title = record.download_url;
+    linkNode.addEventListener("click", () => openExternal(record.download_url));
+    dlRow.appendChild(linkNode);
+  } else {
+    dlRow.appendChild(el("span", "detail-value", "—"));
+  }
+  host.appendChild(dlRow);
+
   const uuidRow = el("div", "detail-row");
   uuidRow.appendChild(el("span", "detail-label", "UUID"));
   uuidRow.appendChild(el("span", "detail-value mono", record.uuid));
@@ -1066,6 +1078,7 @@ function renderDetail() {
 
   const buttons = el("div", "detail-buttons");
   buttons.appendChild(button("打开文件", () => openPrimary(record), files.length === 0));
+  buttons.appendChild(button("打开下载链接", () => openExternal(record.download_url), !record.download_url));
   buttons.appendChild(button("打开 DOI", () => openDoi(record), !record.doi));
   buttons.appendChild(button("复制路径", () => copyText(files[0] ? files[0].path : ""), files.length === 0));
   buttons.appendChild(button("编辑记录", () => openEditor(record)));
@@ -1216,6 +1229,15 @@ function openDoi(record) {
     return;
   }
   window.open("https://doi.org/" + String(record.doi).trim(), "_blank", "noopener");
+}
+
+function openExternal(url) {
+  const text = String(url || "").trim();
+  if (!text) {
+    showMessage("没有可打开的链接", "error");
+    return;
+  }
+  window.open(text, "_blank", "noopener");
 }
 
 async function copyText(text) {
@@ -1710,6 +1732,7 @@ const FIELD_LABELS = {
   isbn: "ISBN",
   issn: "ISSN",
   url: "链接",
+  download_url: "下载链接",
   eprint: "arXiv",
   eventtitle: "会议",
   eventdate: "会期",
@@ -2376,6 +2399,7 @@ function ensureFilePolling() {
 const EDIT_ACTIONS = {
   lookup: enrichSelectedVerify,
   ai: enrichSelectedAi,
+  "enrich-all": openEnrichAllDialog,
   "edit-fields": editFields,
   "add-to-project": editAttachProject,
   delete: editDelete,
@@ -2386,7 +2410,7 @@ function updateEditMenu() {
   const count = state.selection.size;
   const blocked = state.enriching || !state.loaded || count === 0;
   for (const item of document.querySelectorAll("#edit-menu .dropdown-item")) {
-    if (item.dataset.action === "clear") {
+    if (item.dataset.action === "clear" || item.dataset.action === "enrich-all") {
       item.classList.toggle("disabled", !state.loaded || state.enriching || !state.records.length);
     } else {
       item.classList.toggle("disabled", blocked);
@@ -2434,14 +2458,70 @@ async function enrichSelected(mode) {
     showMessage("请先在清单里选中记录", "error");
     return;
   }
+  await enrichUuids(
+    records.map((record) => record.uuid),
+    mode,
+    mode === "verify" ? "联网查询" : "AI 解析"
+  );
+}
+
+function openEnrichAllDialog() {
+  if (!state.loaded || state.enriching || !state.records.length) return;
+  const host = byId("ea-scopes");
+  host.textContent = "";
+  const all = state.records.length;
+  const noUrl = state.records.filter((record) => !(record.download_url || "").trim()).length;
+  const noKey = state.records.filter(
+    (record) => !record.year || !record.venue || !record.doi || !(record.authors || []).length
+  ).length;
+  const makeChoice = (value, label, checked) => {
+    const wrap = el("label");
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "ea-scope";
+    radio.value = value;
+    radio.checked = checked;
+    wrap.appendChild(radio);
+    wrap.appendChild(document.createTextNode(" " + label));
+    host.appendChild(wrap);
+  };
+  makeChoice("all", "全部记录（" + all + " 条）", true);
+  makeChoice("no-url", "仅缺下载链接（" + noUrl + " 条）", false);
+  makeChoice("no-key", "仅缺关键字段（" + noKey + " 条）", false);
+  byId("ea-error").textContent = "";
+  byId("enrich-all-dialog").classList.remove("hidden");
+}
+
+async function startEnrichAll() {
+  const node = document.querySelector("input[name='ea-scope']:checked");
+  const scope = node ? node.value : "all";
+  let uuids;
+  if (scope === "no-url") {
+    uuids = state.records
+      .filter((record) => !(record.download_url || "").trim())
+      .map((record) => record.uuid);
+  } else if (scope === "no-key") {
+    uuids = state.records
+      .filter(
+        (record) => !record.year || !record.venue || !record.doi || !(record.authors || []).length
+      )
+      .map((record) => record.uuid);
+  } else {
+    uuids = state.records.map((record) => record.uuid);
+  }
+  if (!uuids.length) {
+    byId("ea-error").textContent = "没有符合条件的记录";
+    return;
+  }
+  byId("enrich-all-dialog").classList.add("hidden");
+  await enrichUuids(uuids, "verify", "全集联网比对");
+}
+
+async function enrichUuids(uuids, mode, label) {
   if (state.enriching) return;
-  const label = mode === "verify" ? "联网查询" : "AI 解析";
   let started;
   try {
-    started = await api("POST", "/api/records/enrich", {
-      uuids: records.map((record) => record.uuid),
-      mode,
-    });
+    started = await api("POST", "/api/records/enrich", { uuids, mode });
   } catch (error) {
     showMessage(error.message, "error");
     return;
@@ -2505,11 +2585,13 @@ function openPreviewDialog(label, token, payload) {
   for (const item of pending) totalChanges += (item.changes || []).length;
   previewState = { token, label };
   byId("pv-title").textContent = label + " · 变更预览";
+  const shown = pending.slice(0, 200);
   byId("pv-note").textContent =
-    "共 " + pending.length + " 条记录、" + totalChanges + " 处变更；点「应用」才写入，取消则放弃。";
+    "共 " + pending.length + " 条记录、" + totalChanges + " 处变更；点「应用」才写入，取消则放弃。" +
+    (pending.length > shown.length ? "（列表仅显示前 " + shown.length + " 条）" : "");
   const host = byId("pv-body");
   host.textContent = "";
-  for (const item of pending) {
+  for (const item of shown) {
     const block = el("div", "pv-record");
     block.appendChild(el("div", "pv-name", item.title || item.uuid));
     for (const change of item.changes || []) {
@@ -3092,6 +3174,8 @@ byId("lb-primary").addEventListener("click", () => {
   else if (lbPhase === "results") applyLinkBatch();
 });
 byId("lb-cancel").addEventListener("click", () => byId("linkbatch-dialog").classList.add("hidden"));
+byId("ea-ok").addEventListener("click", startEnrichAll);
+byId("ea-cancel").addEventListener("click", () => byId("enrich-all-dialog").classList.add("hidden"));
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     hideRowMenu();
@@ -3108,6 +3192,7 @@ document.addEventListener("keydown", (event) => {
     byId("mapping-dialog").classList.add("hidden");
     byId("link-dialog").classList.add("hidden");
     byId("linkbatch-dialog").classList.add("hidden");
+    byId("enrich-all-dialog").classList.add("hidden");
     if (!byId("setup").classList.contains("hidden")) {
       byId("setup").classList.add("hidden");
       render();

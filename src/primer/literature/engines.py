@@ -62,7 +62,7 @@ def crossref_lookup(title: str) -> list[dict[str, Any]]:
         "rows": 10,
         "select": (
             "DOI,title,author,editor,issued,type,container-title,"
-            "volume,issue,page,publisher,ISBN,ISSN,URL"
+            "volume,issue,page,publisher,ISBN,ISSN,URL,link"
         ),
     })
     request = urllib.request.Request(f"{CROSSREF_URL}?{query}", headers={"User-Agent": USER_AGENT})
@@ -90,10 +90,24 @@ def _crossref_item(item: Any) -> dict[str, Any]:
         "isbn": _first_text(item.get("ISBN")),
         "issn": _first_text(item.get("ISSN")),
         "url": _clean_text(item.get("URL")),
+        "download_url": _crossref_pdf_link(item),
         "institution": _first_text(item.get("institution")),
         "eventtitle": _event_field(item.get("event"), "name"),
         "location": _event_field(item.get("event"), "location"),
     }
+
+
+def _crossref_pdf_link(item: Any) -> Optional[str]:
+    """Crossref ``link`` 里的 ``application/pdf`` 直链（没有则 None）。"""
+    for link in item.get("link") or []:
+        if not isinstance(link, dict):
+            continue
+        if str(link.get("content-type") or "").lower() != "application/pdf":
+            continue
+        url = str(link.get("URL") or "").strip()
+        if url:
+            return url
+    return None
 
 
 def _clean_text(value: Any) -> Optional[str]:
@@ -190,7 +204,7 @@ def ads_lookup(title: str) -> list[dict[str, Any]]:
         )
     query = urllib.parse.urlencode({
         "q": _ads_query(title),
-        "fl": "title,author,year,pub,doi,doctype,volume,issue,page,issn,isbn,publisher",
+        "fl": "title,author,year,pub,doi,doctype,volume,issue,page,issn,isbn,publisher,links_data,identifier",
         "rows": 10,
     })
     request = urllib.request.Request(
@@ -212,6 +226,7 @@ def _ads_query(title: str) -> str:
 def _ads_doc(doc: Any) -> dict[str, Any]:
     doc = doc if isinstance(doc, dict) else {}
     doi_values = doc.get("doi") or []
+    eprint = _ads_eprint(doc.get("identifier"))
     return {
         "title": _clean_title(doc.get("title")),
         "doi": (str(doi_values[0]).strip().lower() or None) if doi_values else None,
@@ -225,7 +240,40 @@ def _ads_doc(doc: Any) -> dict[str, Any]:
         "issn": _first_text(doc.get("issn")),
         "isbn": _first_text(doc.get("isbn")),
         "publisher": _clean_text(doc.get("publisher")),
+        "eprint": eprint or None,
+        "download_url": (
+            f"https://arxiv.org/pdf/{eprint}" if eprint else _ads_pdf_link(doc.get("links_data"))
+        ),
     }
+
+
+def _ads_eprint(identifiers: Any) -> str:
+    """ADS ``identifier`` 列表里的 arXiv 编号（``arXiv:1703.01424`` → ``1703.01424``）。"""
+    for raw in identifiers or []:
+        match = re.match(r"(?i)^arxiv[:：]\s*(.+)$", str(raw).strip())
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _ads_pdf_link(links_data: Any) -> Optional[str]:
+    """ADS ``links_data``（JSON 字符串列表）里的 pdf 直链；只收 pdf 类，其余忽略。"""
+    for raw in links_data or []:
+        try:
+            entry = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        url = str(entry.get("url") or "").strip()
+        if not url:
+            continue
+        lowered = url.lower()
+        if ".pdf" in lowered:
+            return url
+        if "arxiv.org/abs/" in lowered:
+            return url.replace("/abs/", "/pdf/")
+    return None
 
 
 def _ads_year(value: Any) -> Optional[int]:

@@ -49,7 +49,7 @@ CHUNK_SIZE = 10
 _EXTRA_TEXT_FIELDS = (
     "volume", "number", "pages", "eid", "publisher", "location",
     "institution", "organization", "series", "edition", "isbn", "issn",
-    "url", "eprint", "eventtitle", "eventdate", "keywords",
+    "url", "eprint", "eventtitle", "eventdate", "keywords", "download_url",
 )
 
 FIELDS = ("title", "authors", "year", "type", "venue", "doi", "editor", "translator") + _EXTRA_TEXT_FIELDS
@@ -320,7 +320,16 @@ def preview_verify_records(
                 else:
                     report.failed += 1
             else:
-                changes = diff_fields(record, candidate_fields(matched))
+                fields = candidate_fields(matched)
+                # 原文下载链接兜底链：引擎直给 → arXiv PDF → DOI 页。
+                if not fields.get("download_url"):
+                    eprint = str(fields.get("eprint") or record.eprint or "").strip()
+                    doi = str(fields.get("doi") or record.doi or "").strip()
+                    if eprint:
+                        fields["download_url"] = f"https://arxiv.org/pdf/{eprint}"
+                    elif doi:
+                        fields["download_url"] = f"https://doi.org/{doi}"
+                changes = diff_fields(record, fields)
                 if changes:
                     pending.append(
                         {"uuid": record.uuid, "title": record.title, "changes": changes}

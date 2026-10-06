@@ -213,3 +213,55 @@ def test_preview_ai_parse_and_apply():
     assert record.year == 2000 and record.venue == ""  # 预演不改记录
     assert apply_pending([record], pending) == 1
     assert record.year == 1999 and record.venue == "V"
+
+
+def test_verify_preview_fills_download_url_chain():
+    from primer.literature.enrich import apply_pending, preview_verify_records
+
+    record = _record("u9", title="Some paper about detectors", year=2020, doi="10.1000/self")
+
+    def hit(text):
+        return [{
+            "title": "Some paper about detectors", "authors": ["A"], "year": 2020,
+            "doi": "10.1000/self",
+        }]
+
+    report, pending = preview_verify_records([record], [hit])
+    assert report.updated == 1
+    fields = {change["field"]: change["new"] for change in pending[0]["changes"]}
+    assert fields["download_url"] == "https://doi.org/10.1000/self"  # 兜底：DOI 页
+
+    assert apply_pending([record], pending) == 1
+    assert record.download_url == "https://doi.org/10.1000/self"
+
+
+def test_verify_preview_prefers_engine_download_url_and_eprint():
+    from primer.literature.enrich import preview_verify_records
+
+    record = _record("u10", title="Some paper about detectors", year=2020)
+
+    def hit(text):
+        return [{
+            "title": "Some paper about detectors", "authors": ["A"], "year": 2020,
+            "download_url": "https://example.org/oa.pdf",
+            "eprint": "2001.00001",
+        }]
+
+    report, pending = preview_verify_records([record], [hit])
+    assert report.updated == 1
+    fields = {change["field"]: change["new"] for change in pending[0]["changes"]}
+    assert fields["download_url"] == "https://example.org/oa.pdf"  # 引擎直给优先
+    assert fields["eprint"] == "2001.00001"
+
+    record2 = _record("u11", title="Some paper about detectors", year=2020)
+
+    def hit_no_url(text):
+        return [{
+            "title": "Some paper about detectors", "authors": ["A"], "year": 2020,
+            "eprint": "2001.00001",
+        }]
+
+    report2, pending2 = preview_verify_records([record2], [hit_no_url])
+    assert report2.updated == 1
+    fields2 = {change["field"]: change["new"] for change in pending2[0]["changes"]}
+    assert fields2["download_url"] == "https://arxiv.org/pdf/2001.00001"  # arXiv PDF 兜底

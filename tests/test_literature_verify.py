@@ -238,3 +238,39 @@ def test_openalex_non_429_error_is_not_retried(monkeypatch):
         raised = exc
     assert raised is not None and raised.code == 500
     assert len(fake.urls) == 1
+
+
+def test_openalex_work_maps_open_access_and_metadata():
+    from primer.literature.verify import _openalex_work
+
+    work = _openalex_work({
+        "title": "A review article",
+        "doi": "https://doi.org/10.5194/nhess-25-747-2025",
+        "publication_year": 2025,
+        "authorships": [{"author": {"display_name": "A. Author"}}],
+        "primary_location": {"source": {"display_name": "NHESS"}},
+        "type": "review",
+        "biblio": {"volume": "25", "issue": "2", "first_page": "747", "last_page": "780"},
+        "open_access": {"oa_url": "https://example.org/oa"},
+        "best_oa_location": {
+            "pdf_url": "https://example.org/pdf",
+            "landing_page_url": "https://example.org/landing",
+        },
+    })
+    assert work["type"] == "journal-article"
+    assert work["download_url"] == "https://example.org/pdf"
+    assert work["pages"] == "747-780" and work["venue"] == "NHESS"
+
+    with_arxiv = _openalex_work({
+        "title": "T",
+        "open_access": {},
+        "best_oa_location": {"pdf_url": "https://repo.example/a.pdf"},
+        "locations": [
+            {"is_oa": True, "pdf_url": "https://arxiv.org/pdf/1703.01424"},
+            {"is_oa": False, "pdf_url": "https://closed.example/x.pdf"},
+        ],
+    })
+    assert with_arxiv["download_url"] == "https://arxiv.org/pdf/1703.01424"
+
+    closed = _openalex_work({"title": "T", "open_access": None, "best_oa_location": None})
+    assert closed["download_url"] is None

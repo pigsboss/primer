@@ -43,7 +43,7 @@ _DOI_PREFIXES = (
 _RECORD_TEXT_FIELDS = (
     "volume", "number", "pages", "eid", "publisher", "location",
     "institution", "organization", "series", "edition", "isbn", "issn",
-    "url", "eprint", "eventtitle", "eventdate", "keywords",
+    "url", "eprint", "eventtitle", "eventdate", "keywords", "download_url",
 )
 # 列表型书目字段（与 authors 同规：每项一个字符串）。
 _RECORD_LIST_FIELDS = ("editor", "translator")
@@ -153,6 +153,7 @@ class Record:
     eventtitle: str = ""
     eventdate: str = ""
     keywords: str = ""
+    download_url: str = ""
     files: list[FileEntry] = field(default_factory=list)
     projects: list[str] = field(default_factory=list)
     notes: str = ""
