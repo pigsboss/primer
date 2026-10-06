@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 # 本地文件性质的允许取值（界面徽章见《设计规格.md》§3.4）。
-NATURES = ("doi-consistent", "preprint-substitute", "manual-upload", "other")
+NATURES = ("doi-consistent", "preprint-substitute", "title-match", "manual-upload", "other")
 
 _DOI_PREFIXES = (
     "https://doi.org/",

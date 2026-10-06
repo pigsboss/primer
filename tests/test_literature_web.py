@@ -1784,3 +1784,78 @@ def test_retiring_worker_gives_way_to_new_file(tmp_path):
     finally:
         release.set()
         server.close()
+
+
+def test_link_batch_preview_and_apply(tmp_path):
+    import time
+
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    (tmp_path / "parsed" / "alpha").mkdir(parents=True)
+    (tmp_path / "parsed" / "alpha" / "markdown.md").write_text(
+        "# Alpha Mission Study Report\n", encoding="utf-8"
+    )
+    (tmp_path / "parsed" / "beta").mkdir(parents=True)
+    (tmp_path / "parsed" / "beta" / "markdown.md").write_text(
+        "# Completely unrelated wording about tides\n", encoding="utf-8"
+    )
+
+    service = S.LibraryService.initial(str(path))
+    server = _Server(service)
+    try:
+        _, created = server.request("POST", "/api/records", {"title": "Alpha mission study report"})
+        alpha_uuid = created["record"]["uuid"]
+        server.request("POST", "/api/records", {"title": "Beta oceans study", "year": 2021})
+
+        library = service.library
+        library.add_file_record({
+            "path": str(tmp_path / "alpha.pdf"),
+            "name": "alpha.pdf",
+            "size": 1,
+            "md_path": "parsed/alpha/markdown.md",
+            "status": "done",
+        })
+        library.add_file_record({
+            "path": str(tmp_path / "beta.pdf"),
+            "name": "beta.pdf",
+            "size": 1,
+            "md_path": "parsed/beta/markdown.md",
+            "status": "done",
+        })
+        service._persist(library, invalidate_scan=False)
+
+        status, started = server.request("POST", "/api/links/batch/start", {"scope": "unlinked"})
+        assert status == 200 and started["started"] is True
+        token = started["token"]
+        payload = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            _, payload = server.request("POST", "/api/links/batch/status", {"token": token})
+            if payload["status"] != "running":
+                break
+            time.sleep(0.05)
+        assert payload["status"] == "done"
+        result = payload["result"]
+        assert [item["name"] for item in result["proposals"]] == ["alpha.pdf"]
+        proposal = result["proposals"][0]
+        assert proposal["record_uuid"] == alpha_uuid and proposal["tier"] == "strong"
+        assert [item["title"] for item in result["missing"]] == ["Beta oceans study"]
+
+        pair = {
+            "file_uuid": proposal["file_uuid"],
+            "record_uuid": alpha_uuid,
+            "nature": "title-match",
+        }
+        status, data = server.request("POST", "/api/links/batch/apply", {"pairs": [pair]})
+        assert status == 200 and data["linked"] == 1
+        _, files = server.request("GET", "/api/files")
+        item = next(entry for entry in files["files"] if entry["name"] == "alpha.pdf")
+        assert item["record_uuid"] == alpha_uuid and item["nature"] == "title-match"
+
+        _, again = server.request("POST", "/api/links/batch/apply", {"pairs": [pair]})
+        assert again["linked"] == 0
+
+        status, err = server.request("POST", "/api/links/batch/status", {"token": "missing"})
+        assert status == 400 and "no link batch job" in err["message"]
+    finally:
+        server.close()

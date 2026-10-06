@@ -6,6 +6,7 @@
 const NATURES = [
   ["doi-consistent", "正式"],
   ["preprint-substitute", "预印本"],
+  ["title-match", "题名匹配"],
   ["manual-upload", "人工"],
   ["other", "其他"],
 ];
@@ -749,6 +750,7 @@ function recordTitle(uuid) {
 
 let linkMode = null;
 let linkTarget = null;
+let linkPick = null;
 
 function openRecordLinkDialog(record) {
   openLinkDialog({
@@ -768,11 +770,17 @@ function openFileLinkDialog(record) {
   });
 }
 
+function openRecordPicker(title, note, onPick) {
+  openLinkDialog({ mode: "records", onPick, title, note });
+}
+
 function openLinkDialog(options) {
   linkMode = options.mode;
   linkTarget = options.target;
+  linkPick = options.onPick || null;
   byId("ld-title").textContent = options.title;
   byId("ld-note").textContent = options.note || "";
+  byId("ld-nature-row").classList.toggle("hidden", Boolean(linkPick));
   const select = byId("ld-nature");
   select.textContent = "";
   for (const [value, label] of NATURES) {
@@ -880,7 +888,12 @@ async function submitLinkDialog() {
         errorHost.textContent = "请选择一条文献记录";
         return;
       }
-      await attachFiles(chosen.value, linkTarget, nature);
+      if (linkPick) {
+        const record = state.records.find((item) => item.uuid === chosen.value);
+        linkPick(chosen.value, record ? record.title : "");
+      } else {
+        await attachFiles(chosen.value, linkTarget, nature);
+      }
     }
   } catch (error) {
     errorHost.textContent = error.message;
@@ -889,6 +902,7 @@ async function submitLinkDialog() {
   byId("link-dialog").classList.add("hidden");
   linkMode = null;
   linkTarget = null;
+  linkPick = null;
 }
 
 async function detachFileRecord(record) {
@@ -1847,6 +1861,7 @@ const FILE_ACTIONS = {
   import: menuImport,
   "scan-folder": menuScanFolder,
   "add-files": menuAddFiles,
+  "auto-link": autoLink,
   export: menuExport,
 };
 
@@ -1910,6 +1925,364 @@ async function addFilePaths(payload, isFolder) {
     );
   } catch (error) {
     showMessage(error.message, "error");
+  }
+}
+
+// ------------------------------------------------ 批量自动关联（文件 × 文献）
+
+let lbPhase = "options"; // options | running | results
+let lbToken = null;
+let lbResult = null; // {proposals, missing, stats}
+let lbTab = "pairs"; // pairs | missing
+let lbChecked = new Set();
+let lbIgnored = new Set();
+let lbOverride = new Map();
+let lbPolling = false;
+let lbDone = 0;
+let lbTotal = 0;
+
+function autoLink() {
+  if (!state.loaded) return;
+  if (!(lbPhase === "running" || (lbPhase === "results" && lbResult))) {
+    lbPhase = "options";
+    lbResult = null;
+    lbToken = null;
+  }
+  byId("lb-error").textContent = "";
+  renderLinkBatch();
+  byId("linkbatch-dialog").classList.remove("hidden");
+  if (lbPhase === "running") pollLinkBatch();
+}
+
+function renderLinkBatch() {
+  const host = byId("lb-body");
+  host.textContent = "";
+  const primary = byId("lb-primary");
+  if (lbPhase === "options") {
+    primary.textContent = "开始匹配";
+    primary.disabled = false;
+    const parsed = (state.fileRecords || []).filter(
+      (item) => item.status === "done" && item.md_path
+    );
+    const unlinked = parsed.filter((item) => !item.record_uuid).length;
+    const row = el("div", "radio-row");
+    const makeChoice = (value, label, checked) => {
+      const wrap = el("label");
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "lb-scope";
+      radio.value = value;
+      radio.checked = checked;
+      wrap.appendChild(radio);
+      wrap.appendChild(document.createTextNode(" " + label));
+      row.appendChild(wrap);
+    };
+    makeChoice("unlinked", "仅未关联文件（" + unlinked + " 个）", true);
+    makeChoice("all", "全部已解析文件（" + parsed.length + " 个）", false);
+    host.appendChild(row);
+    host.appendChild(
+      el(
+        "p",
+        "hint",
+        "在本地进行：从解析产物 markdown 抽取题名，与全部文献记录比对（标识符／题名／包容判定）；不联网、不改库。" +
+          "完成后先看提案与缺文清单，点「应用选中关联」才写入。"
+      )
+    );
+    host.appendChild(
+      el("p", "hint", "「缺文清单」＝尚未找到本地文件的文献记录，用于筛查还需要获取哪些文献。")
+    );
+    return;
+  }
+  if (lbPhase === "running") {
+    primary.textContent = "匹配中…";
+    primary.disabled = true;
+    const box = el("div", "lb-progress");
+    box.id = "lb-progress";
+    box.textContent = "已评估 " + lbDone + "/" + lbTotal + " …";
+    host.appendChild(box);
+    host.appendChild(el("p", "hint", "匹配在本地进行；可以关闭本对话框，任务会在后台跑完。"));
+    return;
+  }
+  const result = lbResult || { proposals: [], missing: [], stats: {} };
+  const proposals = result.proposals || [];
+  const missing = result.missing || [];
+  const stats = result.stats || {};
+  primary.textContent = "应用选中关联";
+  host.appendChild(
+    el(
+      "p",
+      "lb-stats",
+      "提案 " + proposals.length + " 条（确定 " + (stats.strong || 0) + " ｜ 建议 " +
+        (stats.suggest || 0) + " ｜ 存疑 " + (stats.weak || 0) + "）；缺文清单 " +
+        missing.length + " 条" +
+        (stats.skipped_linked ? "；已关联跳过 " + stats.skipped_linked + " 个文件" : "") +
+        (stats.skipped_unparsed ? "；未解析跳过 " + stats.skipped_unparsed + " 个文件" : "")
+    )
+  );
+  const tabs = el("div", "tabs");
+  const tabPairs = el("button", "tab" + (lbTab === "pairs" ? " active" : ""), "配对提案 " + proposals.length);
+  tabPairs.type = "button";
+  tabPairs.addEventListener("click", () => {
+    lbTab = "pairs";
+    renderLinkBatch();
+  });
+  const tabMissing = el("button", "tab" + (lbTab === "missing" ? " active" : ""), "缺文清单 " + missing.length);
+  tabMissing.type = "button";
+  tabMissing.addEventListener("click", () => {
+    lbTab = "missing";
+    renderLinkBatch();
+  });
+  tabs.appendChild(tabPairs);
+  tabs.appendChild(tabMissing);
+  host.appendChild(tabs);
+  if (lbTab === "pairs") renderLinkBatchPairs(host, proposals);
+  else renderLinkBatchMissing(host, missing);
+}
+
+function linkBatchEvidence(item) {
+  const labels = {
+    doi: "DOI 一致",
+    eprint: "arXiv 一致",
+    containment: "包容判定",
+    "containment-multi": "包容多义",
+  };
+  const how = labels[item.how] || "题名";
+  const ratio = item.how === "title" || item.how === "containment-multi" ? " " + item.ratio.toFixed(3) : "";
+  return how + ratio + (item.tie ? "（并列）" : "");
+}
+
+function renderLinkBatchPairs(host, proposals) {
+  const toolbar = el("div", "lb-toolbar");
+  toolbar.appendChild(
+    button("全选确定级", () => {
+      for (const item of proposals) if (item.tier === "strong") lbChecked.add(item.file_uuid);
+      renderLinkBatch();
+    })
+  );
+  toolbar.appendChild(
+    button("全选确定＋建议", () => {
+      for (const item of proposals) if (item.tier !== "weak") lbChecked.add(item.file_uuid);
+      renderLinkBatch();
+    })
+  );
+  toolbar.appendChild(
+    button("全不选", () => {
+      lbChecked = new Set();
+      renderLinkBatch();
+    })
+  );
+  toolbar.appendChild(el("span", "hint", "勾选＝应用后挂链；「换选」改目标记录，「忽略」只影响本轮。"));
+  host.appendChild(toolbar);
+  if (!proposals.length) {
+    host.appendChild(el("p", "hint", "没有可提案的文件——都已有归属或没有可信候选。"));
+    updateLinkBatchPrimary();
+    return;
+  }
+  const list = el("div", "lb-list");
+  for (const item of proposals) {
+    const ignored = lbIgnored.has(item.file_uuid);
+    const row = el("div", "lb-row" + (ignored ? " ignored" : ""));
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = lbChecked.has(item.file_uuid) && !ignored;
+    box.addEventListener("change", () => {
+      if (box.checked) lbChecked.add(item.file_uuid);
+      else lbChecked.delete(item.file_uuid);
+      updateLinkBatchPrimary();
+    });
+    row.appendChild(box);
+    const main = el("div", "lb-main");
+    main.appendChild(el("div", "lb-file", item.name || item.file_uuid));
+    const override = lbOverride.get(item.file_uuid);
+    const targetTitle = override ? override.title : item.record_title;
+    main.appendChild(
+      el(
+        "div",
+        "lb-target",
+        "→ " + (targetTitle || "（无标题）") + (item.record_year ? "（" + item.record_year + "）" : "")
+      )
+    );
+    row.appendChild(main);
+    const tierLabels = { strong: "确定", suggest: "建议", weak: "存疑" };
+    row.appendChild(el("span", "lb-badge " + item.tier, tierLabels[item.tier] || item.tier));
+    row.appendChild(el("span", "lb-evidence", linkBatchEvidence(item)));
+    const actions = el("div", "lb-actions");
+    actions.appendChild(button("换选", () => pickLinkBatchRecord(item)));
+    actions.appendChild(
+      button("忽略", () => {
+        lbIgnored.add(item.file_uuid);
+        lbChecked.delete(item.file_uuid);
+        renderLinkBatch();
+      })
+    );
+    row.appendChild(actions);
+    list.appendChild(row);
+  }
+  host.appendChild(list);
+  updateLinkBatchPrimary();
+}
+
+function pickLinkBatchRecord(item) {
+  openRecordPicker(
+    "为「" + (item.name || "文件") + "」换选文献记录",
+    "在提案之外重新挑选目标记录（搜索标题或 DOI）。",
+    (recordUuid, title) => {
+      lbOverride.set(item.file_uuid, { uuid: recordUuid, title });
+      lbChecked.add(item.file_uuid);
+      renderLinkBatch();
+    }
+  );
+}
+
+function updateLinkBatchPrimary() {
+  if (lbPhase !== "results") return;
+  const primary = byId("lb-primary");
+  let count = 0;
+  for (const item of (lbResult && lbResult.proposals) || []) {
+    if (lbChecked.has(item.file_uuid) && !lbIgnored.has(item.file_uuid)) count += 1;
+  }
+  primary.textContent = count ? "应用选中关联（" + count + "）" : "应用选中关联";
+  primary.disabled = count === 0;
+}
+
+function renderLinkBatchMissing(host, missing) {
+  const toolbar = el("div", "lb-toolbar");
+  toolbar.appendChild(
+    button("复制清单（TSV）", async () => {
+      const lines = ["题名\t年份\t来源\t最像的文件\t相似度"];
+      for (const item of missing) {
+        lines.push(
+          [item.title || "", item.year || "", item.venue || "", item.closest_file || "", item.closest_ratio || ""].join("\t")
+        );
+      }
+      await copyText(lines.join("\n"));
+    })
+  );
+  toolbar.appendChild(
+    el("span", "hint", "这些文献记录尚未找到本地文件（供获取参考）；「疑似有文件」＝有高相似文件但未达配对门槛，建议人工核。")
+  );
+  host.appendChild(toolbar);
+  if (!missing.length) {
+    host.appendChild(el("p", "hint", "没有缺文记录。"));
+    return;
+  }
+  const list = el("div", "lb-list");
+  for (const item of missing) {
+    const row = el("div", "lb-row");
+    const main = el("div", "lb-main");
+    main.appendChild(el("div", "lb-file", item.title || "（无标题）"));
+    const parts = [];
+    if (item.year) parts.push(String(item.year));
+    if (item.venue) parts.push(item.venue);
+    if (item.closest_file) parts.push("最像：" + item.closest_file + "（" + item.closest_ratio + "）");
+    main.appendChild(el("div", "lb-target", parts.join(" · ")));
+    row.appendChild(main);
+    if (item.closest_ratio >= 0.8) row.appendChild(el("span", "lb-suspect", "疑似有文件"));
+    list.appendChild(row);
+  }
+  host.appendChild(list);
+}
+
+async function startLinkBatch() {
+  byId("lb-error").textContent = "";
+  const scopeNode = document.querySelector("input[name='lb-scope']:checked");
+  const scope = scopeNode ? scopeNode.value : "unlinked";
+  let started;
+  try {
+    started = await api("POST", "/api/links/batch/start", { scope });
+  } catch (error) {
+    byId("lb-error").textContent = error.message;
+    return;
+  }
+  lbToken = started.token;
+  lbDone = 0;
+  lbTotal = started.total;
+  lbPhase = "running";
+  renderLinkBatch();
+  pollLinkBatch();
+}
+
+async function pollLinkBatch() {
+  if (lbPolling) return;
+  lbPolling = true;
+  try {
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      let status;
+      try {
+        status = await api("POST", "/api/links/batch/status", { token: lbToken });
+      } catch (error) {
+        byId("lb-error").textContent = error.message;
+        lbPhase = "options";
+        renderLinkBatch();
+        return;
+      }
+      if (status.status === "running") {
+        lbDone = status.done;
+        lbTotal = status.total;
+        const box = byId("lb-progress");
+        if (box) box.textContent = "已评估 " + status.done + "/" + status.total + " …";
+        continue;
+      }
+      if (status.status === "failed") {
+        byId("lb-error").textContent = "匹配失败：" + status.error;
+        lbPhase = "options";
+        renderLinkBatch();
+        return;
+      }
+      lbResult = status.result || { proposals: [], missing: [], stats: {} };
+      lbPhase = "results";
+      lbTab = "pairs";
+      lbChecked = new Set();
+      lbIgnored = new Set();
+      lbOverride = new Map();
+      for (const item of lbResult.proposals || []) {
+        if (item.tier === "strong" || item.tier === "suggest") lbChecked.add(item.file_uuid);
+      }
+      renderLinkBatch();
+      showMessage(
+        "自动关联完成：提案 " + (lbResult.proposals || []).length + " 条，缺文 " +
+          (lbResult.missing || []).length + " 条",
+        "info"
+      );
+      return;
+    }
+  } finally {
+    lbPolling = false;
+  }
+}
+
+async function applyLinkBatch() {
+  if (!lbResult) return;
+  const pairs = [];
+  for (const item of lbResult.proposals || []) {
+    if (!lbChecked.has(item.file_uuid) || lbIgnored.has(item.file_uuid)) continue;
+    const override = lbOverride.get(item.file_uuid);
+    pairs.push({
+      file_uuid: item.file_uuid,
+      record_uuid: override ? override.uuid : item.record_uuid,
+      nature: item.nature,
+    });
+  }
+  if (!pairs.length) return;
+  byId("lb-error").textContent = "";
+  byId("lb-primary").disabled = true;
+  try {
+    const data = await api("POST", "/api/links/batch/apply", { pairs });
+    showMessage(
+      "已关联 " + data.linked + " 个文件" + (data.replaced ? "（改挂 " + data.replaced + " 个）" : ""),
+      "info"
+    );
+    lbPhase = "options";
+    lbResult = null;
+    lbToken = null;
+    byId("linkbatch-dialog").classList.add("hidden");
+    await refreshFiles();
+    renderList();
+    renderDetail();
+  } catch (error) {
+    byId("lb-error").textContent = error.message;
+    byId("lb-primary").disabled = false;
   }
 }
 
@@ -2660,8 +3033,14 @@ byId("ld-cancel").addEventListener("click", () => {
   byId("link-dialog").classList.add("hidden");
   linkMode = null;
   linkTarget = null;
+  linkPick = null;
 });
 byId("ld-search").addEventListener("input", renderLinkOptions);
+byId("lb-primary").addEventListener("click", () => {
+  if (lbPhase === "options") startLinkBatch();
+  else if (lbPhase === "results") applyLinkBatch();
+});
+byId("lb-cancel").addEventListener("click", () => byId("linkbatch-dialog").classList.add("hidden"));
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     hideRowMenu();
@@ -2677,6 +3056,7 @@ document.addEventListener("keydown", (event) => {
     byId("preview-dialog").classList.add("hidden");
     byId("mapping-dialog").classList.add("hidden");
     byId("link-dialog").classList.add("hidden");
+    byId("linkbatch-dialog").classList.add("hidden");
     if (!byId("setup").classList.contains("hidden")) {
       byId("setup").classList.add("hidden");
       render();

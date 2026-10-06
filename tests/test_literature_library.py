@@ -38,7 +38,13 @@ def _write(path, records):
 
 
 def test_natures_tuple_is_stable():
-    assert NATURES == ("doi-consistent", "preprint-substitute", "manual-upload", "other")
+    assert NATURES == (
+        "doi-consistent",
+        "preprint-substitute",
+        "title-match",
+        "manual-upload",
+        "other",
+    )
 
 
 def test_load_missing_file_raises(tmp_path):

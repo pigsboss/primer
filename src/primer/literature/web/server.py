@@ -42,6 +42,9 @@
     POST   /api/files/delete      {uuid} 删除文件记录（磁盘上的文件与产物不动）
     POST   /api/links/attach      {record_uuid, file_uuids, nature?} 把文件挂到文献记录（改挂／改性质）
     POST   /api/links/detach      {file_uuids} 解除文件记录的文献关联
+    POST   /api/links/batch/start  {scope: "unlinked"|"all"} 启动「文件 × 文献」批量自动关联（后台计算，不改库）
+    POST   /api/links/batch/status {token} 关联任务进度；完成后附提案清单＋缺文清单
+    POST   /api/links/batch/apply  {pairs} 用户确认后把关联对批量落库（一次落盘）
     GET    /static/<rel>          静态资源（限包内 static/ 目录）
 
 错误响应统一为 ``{"error": <机器码>, "message": <英文>}``；状态码：校验 400、
@@ -164,6 +167,7 @@ class LibraryService:
         self.imports: dict[str, Any] = {}
         self.refines: dict[str, dict[str, Any]] = {}
         self.enrich_job: dict[str, Any] = {}
+        self.link_job: dict[str, Any] = {}
         self.declared: list[str] = []
         self._chat_sender = chat_sender
         self._web_lookup = web_lookup
@@ -427,6 +431,145 @@ class LibraryService:
             if updated:
                 self._persist(library, invalidate_scan=False)
             return {"updated": updated}
+
+    # ----------------------------------------------------- 批量自动关联
+
+    def start_link_batch(self, scope: Any) -> dict[str, Any]:
+        """启动一轮「文件 × 文献」自动关联（后台线程；只计算，不改库）。"""
+        if scope not in ("unlinked", "all"):
+            raise LibraryError(f"unknown scope: {scope!r} (expected 'unlinked' or 'all')")
+        with self._lock:
+            library = self._require()
+            job = self.link_job
+            if job.get("status") == "running":
+                raise LibraryError("a link batch job is already running")
+            records = list(library.records)
+            files = list(library.file_records)
+            library_dir = library.path.parent
+            token = str(_uuid.uuid4())
+            self.link_job = {
+                "token": token,
+                "scope": scope,
+                "status": "running",
+                "done": 0,
+                "total": len(files),
+                "result": None,
+                "error": "",
+            }
+            thread = threading.Thread(
+                target=self._run_link_batch,
+                args=(token, records, files, scope, library_dir),
+                daemon=True,
+            )
+        thread.start()
+        return {"started": True, "token": token, "total": len(files)}
+
+    def link_batch_status(self, token: Any) -> dict[str, Any]:
+        """关联任务进度；完成后附 ``result``（提案＋缺文清单＋统计）。"""
+        if not isinstance(token, str) or not token:
+            raise LibraryError("link batch token is required")
+        with self._lock:
+            job = self.link_job
+            if not job or job.get("token") != token:
+                raise LibraryError(f"no link batch job for token: {token}")
+            payload = {
+                "status": job["status"],
+                "scope": job["scope"],
+                "done": job["done"],
+                "total": job["total"],
+            }
+            if job["status"] == "failed":
+                payload["error"] = job["error"]
+            if job["status"] == "done" and job.get("result") is not None:
+                payload["result"] = job["result"]
+            return payload
+
+    def _run_link_batch(
+        self,
+        token: str,
+        records: list[Record],
+        files: list[FileRecord],
+        scope: str,
+        library_dir: Path,
+    ) -> None:
+        """后台关联线程：读解析产物、跑匹配；任何异常都收成 job 的 failed。"""
+        from ..link import propose_links
+
+        job = self.link_job
+        if job.get("token") != token:
+            return
+
+        def read_markdown(file_record: FileRecord) -> str:
+            md_path = getattr(file_record, "md_path", "")
+            if not md_path:
+                return ""
+            try:
+                return (library_dir / md_path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return ""
+
+        def progress(done: int, total: int) -> None:
+            with self._lock:
+                job["done"] = done
+                job["total"] = total
+
+        try:
+            result = propose_links(
+                records, files, scope=scope, read_markdown=read_markdown, on_progress=progress
+            )
+        except Exception as exc:
+            with self._lock:
+                job["status"] = "failed"
+                job["error"] = str(exc)[:300] or type(exc).__name__
+            return
+        with self._lock:
+            job["result"] = result
+            job["done"] = job["total"]
+            job["status"] = "done"
+
+    def apply_link_batch(self, pairs: Any) -> dict[str, Any]:
+        """把用户确认的关联对批量落库（一次落盘）；返回 关联／改挂 计数。"""
+        if (
+            not isinstance(pairs, list)
+            or not pairs
+            or not all(
+                isinstance(item, dict)
+                and isinstance(item.get("file_uuid"), str)
+                and isinstance(item.get("record_uuid"), str)
+                for item in pairs
+            )
+        ):
+            raise LibraryError("pairs must be a non-empty list of {file_uuid, record_uuid, nature?}")
+        with self._lock:
+            library = self._require()
+            resolved: list[tuple[FileRecord, Record, str]] = []
+            for item in pairs:
+                file_record = library.find_file(item["file_uuid"])
+                if file_record is None:
+                    raise LibraryError(f"file record not found: {item['file_uuid']}")
+                record = library.find(item["record_uuid"])
+                if record is None:
+                    raise LibraryError(f"record not found: {item['record_uuid']}")
+                nature = item.get("nature") or "title-match"
+                if nature not in NATURES:
+                    allowed = "/".join(NATURES)
+                    raise LibraryError(f"nature: expected one of {allowed}, got {nature!r}")
+                resolved.append((file_record, record, nature))
+            linked = 0
+            replaced = 0
+            for file_record, record, nature in resolved:
+                if file_record.record_uuid == record.uuid and file_record.nature == nature:
+                    continue
+                if file_record.record_uuid and file_record.record_uuid != record.uuid:
+                    replaced += 1
+                file_record.record_uuid = record.uuid
+                file_record.nature = nature
+                file_record.dup = {}
+                file_record.updated_at = now_iso()
+                linked += 1
+            if linked:
+                self._persist(library, invalidate_scan=False)
+            return {"linked": linked, "replaced": replaced}
 
     def bulk_update_records(self, uuids: Any, fields: Any) -> dict[str, Any]:
         """把 ``fields`` 合并进选中记录（只改给定字段）；返回更新条数。"""
@@ -2036,6 +2179,14 @@ def make_handler(service: LibraryService):
                     return self._send_json(200, service.enrich_preview(payload.get("token")))
                 if path == "/api/records/enrich/apply":
                     return self._send_json(200, service.apply_enrich(payload.get("token")))
+                if path == "/api/links/batch/start":
+                    return self._send_json(
+                        200, service.start_link_batch(payload.get("scope", "unlinked"))
+                    )
+                if path == "/api/links/batch/status":
+                    return self._send_json(200, service.link_batch_status(payload.get("token")))
+                if path == "/api/links/batch/apply":
+                    return self._send_json(200, service.apply_link_batch(payload.get("pairs")))
                 if path == "/api/records/bulk-update":
                     return self._send_json(
                         200,

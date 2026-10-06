@@ -18,6 +18,7 @@
         <div class="dropdown-item" data-action="import">导入…</div>
         <div class="dropdown-item" data-action="scan-folder">扫描文件夹…</div>
         <div class="dropdown-item" data-action="add-files">添加本地文件…</div>
+        <div class="dropdown-item" data-action="auto-link">自动关联…</div>
         <div class="dropdown-item" data-action="export">导出…</div>
       </div>
     </div>
@@ -276,6 +277,18 @@
       <div class="dialog-buttons">
         <button id="ed-cancel">取消</button>
         <button id="ed-save" class="primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="linkbatch-dialog" class="modal hidden">
+    <div class="dialog wide">
+      <h2>自动关联（文件 × 文献）</h2>
+      <div id="lb-body"></div>
+      <p id="lb-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button id="lb-cancel">关闭</button>
+        <button id="lb-primary" class="primary">开始匹配</button>
       </div>
     </div>
   </div>
