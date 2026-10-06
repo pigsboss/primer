@@ -10,6 +10,7 @@ from primer.literature.enrich import (
     apply_fields,
     clean_ai_fields,
     match_candidate,
+    preview_project_infer,
     verify_records,
 )
 from primer.literature.library import Record
@@ -265,3 +266,46 @@ def test_verify_preview_prefers_engine_download_url_and_eprint():
     assert report2.updated == 1
     fields2 = {change["field"]: change["new"] for change in pending2[0]["changes"]}
     assert fields2["download_url"] == "https://arxiv.org/pdf/2001.00001"  # arXiv PDF 兜底
+
+
+def test_preview_project_infer_validates_candidates():
+    records = [
+        _record("p1", title="Seismic nucleation experiment", notes="原始记录：亚失稳理论与实验研究"),
+        _record("p2", title="Storm surge modelling", notes="原始记录：全球风暴潮模式"),
+        _record("p3", title="Decadal survey", notes="原始记录：行星科学十年调查"),
+    ]
+
+    def chat(system, user):
+        assert "候选项目" in user
+        return (
+            '[{"i": 0, "projects": ["地震前兆探测"]},'
+            ' {"i": 1, "projects": ["风暴海啸预报", "不存在的项目"]},'
+            ' {"i": 2, "projects": []}]'
+        )
+
+    report, pending = preview_project_infer(
+        records, [0, 1, 2], ["地震前兆探测", "风暴海啸预报"], chat
+    )
+    assert report.updated == 2 and report.skipped == 1 and report.failed == 0
+    assert pending[0]["uuid"] == "p1" and pending[0]["projects"] == ["地震前兆探测"]
+    # 不在候选里的路径被逐字校验丢弃
+    assert pending[1]["projects"] == ["风暴海啸预报"]
+
+    with pytest.raises(ValueError):
+        preview_project_infer(records, [0], [], chat)
+
+
+def test_preview_project_infer_chunk_failure_and_dedupe():
+    records = [_record("p1", title="A", notes="n", projects=["地震前兆探测"])]
+
+    reply = '[{"i": 0, "projects": ["地震前兆探测"]}]'
+    report, pending = preview_project_infer(
+        records, [0], ["地震前兆探测"], lambda system, user: reply, chunk_size=1
+    )
+    assert report.skipped == 1 and not pending  # 已有项目 → 无变更
+
+    def broken(system, user):
+        raise RuntimeError("LLM down")
+
+    with pytest.raises(RuntimeError):
+        preview_project_infer(records, [0], ["地震前兆探测"], broken, chunk_size=1)

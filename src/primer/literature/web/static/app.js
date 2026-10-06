@@ -341,6 +341,7 @@ function renderTopbar() {
   byId("lib-path").title = state.loaded ? state.path : state.defaultPath || "";
   byId("btn-new").disabled = !state.loaded;
   byId("btn-scan").disabled = !state.loaded;
+  byId("btn-parse-unfinished").disabled = !state.loaded;
 }
 
 function renderUnloaded() {
@@ -1181,6 +1182,36 @@ async function rescan() {
   } catch (error) {
     showMessage(error.message, "error");
   }
+}
+
+async function parseUnfinished() {
+  if (!state.loaded) return;
+  let data;
+  try {
+    data = await api("POST", "/api/files/parse-unfinished", {});
+  } catch (error) {
+    showMessage(error.message, "error");
+    return;
+  }
+  if (data.queued) {
+    const extra = [];
+    if (data.pending) extra.push("待解析 " + data.pending);
+    if (data.parsing) extra.push("解析中 " + data.parsing);
+    showMessage(
+      "已排入解析队列 " + data.queued + " 条" + (extra.length ? "（另有 " + extra.join("、") + " 在队列中）" : ""),
+      "info"
+    );
+  } else if (data.pending || data.parsing) {
+    showMessage(
+      "未完成的文件均已在队列中（待解析 " + (data.pending || 0) + "、解析中 " + (data.parsing || 0) + "）",
+      "info"
+    );
+  } else {
+    showMessage("没有未完成的文件", "info");
+  }
+  switchView("files");
+  await refreshFiles();
+  ensureFilePolling();
 }
 
 async function afterMutation() {
@@ -2767,6 +2798,252 @@ async function pollFetch() {
   }
 }
 
+// ------------------------------------------------ 按备注推断项目（LLM，预演＋应用）
+
+let piPhase = "options"; // options | running | results
+let piToken = null;
+let piResult = null;
+let piChecked = new Set();
+let piPolling = false;
+let piDone = 0;
+let piTotal = 0;
+
+function projectInferOpen() {
+  if (!state.loaded) return;
+  if (!(piPhase === "running" || (piPhase === "results" && piResult))) {
+    piPhase = "options";
+    piResult = null;
+    piToken = null;
+  }
+  byId("pi-error").textContent = "";
+  renderProjectInfer();
+  byId("pinfer-dialog").classList.remove("hidden");
+  if (piPhase === "running") pollProjectInfer();
+}
+
+function renderProjectInfer() {
+  const host = byId("pi-body");
+  host.textContent = "";
+  const primary = byId("pi-primary");
+  if (piPhase === "options") {
+    primary.textContent = "开始推断";
+    primary.disabled = false;
+    const noProject = state.records.filter((record) => !(record.projects || []).length).length;
+    const selection = state.selection ? state.selection.size : 0;
+    const row = el("div", "radio-row");
+    const makeChoice = (value, label, checked, disabled) => {
+      const wrap = el("label");
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "pi-scope";
+      radio.value = value;
+      radio.checked = checked;
+      radio.disabled = Boolean(disabled);
+      wrap.appendChild(radio);
+      wrap.appendChild(document.createTextNode(" " + label));
+      row.appendChild(wrap);
+    };
+    makeChoice("no-project", "仅无项目的记录（" + noProject + " 条）", true, false);
+    makeChoice("all", "全部记录（" + state.records.length + " 条）", false, false);
+    makeChoice("selected", "选中的记录（" + selection + " 条）", false, selection === 0);
+    host.appendChild(row);
+    host.appendChild(el("div", "hint", "候选项目（每行一个路径；模型只会从这些路径中选择）"));
+    const area = document.createElement("textarea");
+    area.id = "pi-candidates";
+    area.rows = 6;
+    area.spellcheck = false;
+    area.value = projectPaths().join("\n");
+    host.appendChild(area);
+    host.appendChild(
+      el(
+        "p",
+        "hint",
+        "推断依据：题名＋备注（原始题录引用）＋关键词；后台逐块调用文献角色 LLM（roles.literature／extract／select），只预演、不改库。"
+      )
+    );
+    return;
+  }
+  if (piPhase === "running") {
+    primary.textContent = "推断中…";
+    primary.disabled = true;
+    const box = el("div", "lb-progress");
+    box.id = "pi-progress";
+    box.textContent = "已推断 " + piDone + "/" + piTotal + " …";
+    host.appendChild(box);
+    host.appendChild(el("p", "hint", "推断在后台进行，可关闭本对话框。"));
+    return;
+  }
+  renderProjectInferResults(host);
+}
+
+function renderProjectInferResults(host) {
+  const proposals = (piResult && piResult.proposals) || [];
+  const stats = (piResult && piResult.stats) || {};
+  host.appendChild(
+    el(
+      "p",
+      "lb-stats",
+      "有提议 " + (stats.updated || 0) + " ｜ 无变更 " + (stats.skipped || 0) + " ｜ 失败 " + (stats.failed || 0)
+    )
+  );
+  const toolbar = el("div", "lb-toolbar");
+  toolbar.appendChild(
+    button("全选", () => {
+      for (const item of proposals) piChecked.add(item.uuid);
+      renderProjectInfer();
+    })
+  );
+  toolbar.appendChild(
+    button("全不选", () => {
+      piChecked = new Set();
+      renderProjectInfer();
+    })
+  );
+  toolbar.appendChild(el("span", "hint", "勾选＝应用时挂入；已有项目不动，只追加。"));
+  host.appendChild(toolbar);
+  const list = el("div", "lb-list");
+  for (const item of proposals) {
+    const row = el("div", "lb-row");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = piChecked.has(item.uuid);
+    box.addEventListener("change", () => {
+      if (box.checked) piChecked.add(item.uuid);
+      else piChecked.delete(item.uuid);
+      updateProjectInferPrimary();
+    });
+    row.appendChild(box);
+    const main = el("div", "lb-main");
+    main.appendChild(el("div", "lb-file", item.title || item.uuid));
+    const parts = [];
+    if ((item.current || []).length) parts.push("现：" + item.current.join("／"));
+    parts.push("建议：" + (item.projects || []).join("／"));
+    main.appendChild(el("div", "lb-target", parts.join("　→　")));
+    row.appendChild(main);
+    list.appendChild(row);
+  }
+  host.appendChild(list);
+  updateProjectInferPrimary();
+}
+
+function updateProjectInferPrimary() {
+  if (piPhase !== "results") return;
+  const primary = byId("pi-primary");
+  const count = piChecked.size;
+  primary.textContent = count ? "应用选中（" + count + "）" : "应用选中";
+  primary.disabled = count === 0;
+}
+
+async function startProjectInfer() {
+  byId("pi-error").textContent = "";
+  const scopeNode = document.querySelector("input[name='pi-scope']:checked");
+  const scope = scopeNode ? scopeNode.value : "no-project";
+  const area = byId("pi-candidates");
+  const candidates = (area ? area.value : "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!candidates.length) {
+    byId("pi-error").textContent = "请先填写候选项目（每行一个路径）";
+    return;
+  }
+  let uuids;
+  if (scope === "selected") {
+    uuids = Array.from(state.selection);
+  } else if (scope === "no-project") {
+    uuids = state.records
+      .filter((record) => !(record.projects || []).length)
+      .map((record) => record.uuid);
+  } else {
+    uuids = state.records.map((record) => record.uuid);
+  }
+  if (!uuids.length) {
+    byId("pi-error").textContent = "没有符合条件的记录";
+    return;
+  }
+  let started;
+  try {
+    started = await api("POST", "/api/projects/infer", { uuids, candidates });
+  } catch (error) {
+    byId("pi-error").textContent = error.message;
+    return;
+  }
+  piToken = started.token;
+  piDone = 0;
+  piTotal = started.total;
+  piPhase = "running";
+  renderProjectInfer();
+  pollProjectInfer();
+}
+
+async function applyProjectInfer() {
+  if (!piResult) return;
+  const chosen = piResult.proposals.filter((item) => piChecked.has(item.uuid));
+  if (!chosen.length) return;
+  byId("pi-error").textContent = "";
+  const groups = new Map();
+  for (const item of chosen) {
+    for (const path of item.projects || []) {
+      if (!groups.has(path)) groups.set(path, []);
+      groups.get(path).push(item.uuid);
+    }
+  }
+  let updated = 0;
+  try {
+    for (const [path, uuids] of groups) {
+      const data = await api("POST", "/api/projects/attach", { path, uuids });
+      updated += data.updated || 0;
+    }
+  } catch (error) {
+    byId("pi-error").textContent = error.message;
+    return;
+  }
+  byId("pinfer-dialog").classList.add("hidden");
+  showMessage("已挂入项目 " + updated + " 条", "info");
+  await afterMutation();
+}
+
+async function pollProjectInfer() {
+  if (piPolling) return;
+  piPolling = true;
+  try {
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      let status;
+      try {
+        status = await api("POST", "/api/projects/infer/status", { token: piToken });
+      } catch (error) {
+        byId("pi-error").textContent = error.message;
+        piPhase = "options";
+        renderProjectInfer();
+        return;
+      }
+      if (status.status === "running") {
+        piDone = status.done;
+        piTotal = status.total;
+        const box = byId("pi-progress");
+        if (box) box.textContent = "已推断 " + status.done + "/" + status.total + " …";
+        continue;
+      }
+      if (status.status === "failed") {
+        byId("pi-error").textContent = "失败：" + status.error;
+        piPhase = "options";
+        renderProjectInfer();
+        return;
+      }
+      piResult = status.result || { proposals: [], stats: {} };
+      piChecked = new Set((piResult.proposals || []).map((item) => item.uuid));
+      piPhase = "results";
+      renderProjectInfer();
+      const st = piResult.stats || {};
+      showMessage("推断完成：有提议 " + (st.updated || 0) + " 条", "info");
+      return;
+    }
+  } finally {
+    piPolling = false;
+  }
+}
+
 function switchView(view) {
   state.view = view;
   byId("tab-records").classList.toggle("active", view === "records");
@@ -3074,6 +3351,7 @@ async function editClear() {
 const PROJECT_ACTIONS = {
   create: projectCreate,
   "attach-records": projectAttachRecords,
+  infer: projectInferOpen,
   move: projectMove,
   rename: projectRename,
   delete: projectDelete,
@@ -3089,7 +3367,7 @@ function updateProjectMenu() {
     let disabled = !state.loaded;
     if (action === "attach-records") {
       disabled = disabled || !onNode || state.selection.size === 0;
-    } else if (action !== "create") {
+    } else if (action !== "create" && action !== "infer") {
       disabled = disabled || !onNode;
     }
     item.classList.toggle("disabled", disabled);
@@ -3452,6 +3730,7 @@ byId("search").addEventListener("input", () => {
 });
 byId("btn-new").addEventListener("click", () => openEditor(null));
 byId("btn-scan").addEventListener("click", rescan);
+byId("btn-parse-unfinished").addEventListener("click", parseUnfinished);
 byId("tab-records").addEventListener("click", () => switchView("records"));
 byId("tab-files").addEventListener("click", async () => {
   switchView("files");
@@ -3589,6 +3868,11 @@ byId("ft-primary").addEventListener("click", () => {
   else if (ftPhase === "report") byId("fetch-dialog").classList.add("hidden");
 });
 byId("ft-cancel").addEventListener("click", () => byId("fetch-dialog").classList.add("hidden"));
+byId("pi-primary").addEventListener("click", () => {
+  if (piPhase === "options") startProjectInfer();
+  else if (piPhase === "results") applyProjectInfer();
+});
+byId("pi-cancel").addEventListener("click", () => byId("pinfer-dialog").classList.add("hidden"));
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     hideRowMenu();
@@ -3607,6 +3891,7 @@ document.addEventListener("keydown", (event) => {
     byId("linkbatch-dialog").classList.add("hidden");
     byId("enrich-all-dialog").classList.add("hidden");
     byId("fetch-dialog").classList.add("hidden");
+    byId("pinfer-dialog").classList.add("hidden");
     if (!byId("setup").classList.contains("hidden")) {
       byId("setup").classList.add("hidden");
       render();

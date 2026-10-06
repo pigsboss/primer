@@ -2136,3 +2136,102 @@ def test_fetch_download_retry_failure_reports_item(tmp_path):
         assert not list(target.glob("*.pdf"))
     finally:
         server.close()
+
+
+def test_parse_unfinished_endpoint(tmp_path):
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    service = S.LibraryService.initial(str(path), parser=lambda source: "# t\n")
+    service._ensure_parse_worker = lambda: None  # 避免后台 worker 与断言竞态
+    server = _Server(service)
+    try:
+        library = service.library
+        (tmp_path / "a.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+        done = library.add_file_record(
+            {"path": str(tmp_path / "a.pdf"), "name": "a.pdf", "size": 1, "status": "done"}
+        )
+        failed = library.add_file_record(
+            {"path": str(tmp_path / "b.pdf"), "name": "b.pdf", "size": 1, "status": "failed"}
+        )
+        downloaded = library.add_file_record(
+            {"path": str(tmp_path / "c.pdf"), "name": "c.pdf", "size": 1, "status": "downloaded"}
+        )
+        parsing = library.add_file_record(
+            {"path": str(tmp_path / "d.pdf"), "name": "d.pdf", "size": 1, "status": "parsing"}
+        )
+        service._persist(library, invalidate_scan=False)
+
+        status, data = server.request("POST", "/api/files/parse-unfinished", {})
+        assert status == 200 and data["queued"] == 2
+        assert data["pending"] == 0 and data["parsing"] == 1
+        assert library.find_file(failed.uuid).status == "pending"
+        assert library.find_file(downloaded.uuid).status == "pending"
+        assert library.find_file(done.uuid).status == "done"
+        assert library.find_file(parsing.uuid).status == "parsing"
+    finally:
+        server.close()
+
+
+def test_project_infer_endpoint_and_apply(tmp_path):
+    import time
+
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    service = S.LibraryService.initial(str(path))
+    replies = []
+
+    def fake_chat(system, user):
+        replies.append(user)
+        return (
+            '[{"i": 0, "projects": ["地震前兆探测"]},'
+            ' {"i": 1, "projects": ["不存在的项目"]},'
+            ' {"i": 2, "projects": []}]'
+        )
+
+    service._chat_sender = fake_chat
+    server = _Server(service)
+    try:
+        titles = ["Seismic nucleation", "Storm surge model", "Planetary decadal survey"]
+        uuids = []
+        for title in titles:
+            _, created = server.request("POST", "/api/records", {"title": title})
+            uuids.append(created["record"]["uuid"])
+
+        status, err = server.request(
+            "POST", "/api/projects/infer", {"uuids": uuids, "candidates": []}
+        )
+        assert status == 400 and "candidates" in err["message"]
+
+        status, started = server.request(
+            "POST",
+            "/api/projects/infer",
+            {"uuids": uuids, "candidates": ["地震前兆探测", "风暴海啸预报"]},
+        )
+        assert status == 200 and started["total"] == 3
+        token = started["token"]
+        payload = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            _, payload = server.request("POST", "/api/projects/infer/status", {"token": token})
+            if payload["status"] != "running":
+                break
+            time.sleep(0.05)
+        assert payload["status"] == "done"
+        result = payload["result"]
+        assert result["stats"] == {"updated": 1, "skipped": 2, "failed": 0}
+        assert result["proposals"][0]["uuid"] == uuids[0]
+        assert result["proposals"][0]["projects"] == ["地震前兆探测"]
+        assert "候选项目" in replies[0]
+
+        status, data = server.request(
+            "POST", "/api/projects/attach", {"path": "地震前兆探测", "uuids": [uuids[0]]}
+        )
+        assert status == 200 and data["updated"] == 1
+
+        status, err = server.request("POST", "/api/projects/infer/status", {"token": "missing"})
+        assert status == 400 and "no project infer job" in err["message"]
+    finally:
+        server.close()
+
+    reloaded = S.LibraryService.initial(str(path))
+    assert reloaded.library.find(uuids[0]).projects == ["地震前兆探测"]

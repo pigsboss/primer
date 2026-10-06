@@ -28,6 +28,7 @@ __all__ = [
     "CHUNK_SIZE",
     "EnrichReport",
     "FIELDS",
+    "PROJECT_SYSTEM_PROMPT",
     "TYPES",
     "ai_parse",
     "apply_candidate",
@@ -38,6 +39,7 @@ __all__ = [
     "diff_fields",
     "match_candidate",
     "preview_ai_parse",
+    "preview_project_infer",
     "preview_verify_records",
     "record_text",
     "verify_records",
@@ -93,6 +95,15 @@ AI_SYSTEM_PROMPT = """你是文献题录的校订器。输入是若干条文献�
   eventtitle 会议名称；eventdate 会议日期；keywords 关键词（分号分隔）；
 - doi：只能逐字取自输入文本（包括 notes）；输入中没有或拿不准就给 null——绝不猜测；
 - 不要输出 uuid／files／projects／notes／created_at／updated_at 等其它字段。
+"""
+
+PROJECT_SYSTEM_PROMPT = """你是文献归类助手。输入是若干条文献记录，每条以 "i=<序号>:" 开头，
+后跟 title／notes（notes 通常包含原始题录引用）等字段，另有一份候选项目清单。
+对每一条输出一个 JSON 对象：{"i": <序号>, "projects": [<项目路径>, ...]}
+规则：
+- projects 只能从候选项目清单中逐字照抄，不得改写、不得新造项目；
+- 一条记录可归入多个项目；拿不准、或与任何候选都不相关时给空数组；
+- 只输出一个 JSON 数组，包含输入里的每一条；不要解释，不要 markdown 代码围栏。
 """
 
 
@@ -443,6 +454,81 @@ def ai_parse(
     return report
 
 
+def preview_project_infer(
+    records: Sequence[Record],
+    indices: Sequence[int],
+    candidates: Sequence[str],
+    chat: Callable[[str, str], str],
+    *,
+    chunk_size: int = CHUNK_SIZE,
+    on_progress: Optional[Callable[[int], None]] = None,
+) -> tuple[EnrichReport, list[dict[str, Any]]]:
+    """按备注推断项目的**预演**：只计算变更、不改记录；返回 (统计, 待应用清单)。
+
+    清单元素形如 ``{"uuid", "title", "projects": [...新增...], "current": [...]}``；
+    模型给出的路径逐字校验（只认候选清单里的），已有项目自动去重；块失败只影响
+    该块（调用报错或回信不可解析），**全部块都失败**时抛回第一个原始异常。
+    """
+    allowed = [str(item).strip() for item in candidates if str(item).strip()]
+    if not allowed:
+        raise ValueError("candidates must be a non-empty list of project paths")
+    allowed_set = set(allowed)
+    report = EnrichReport()
+    pending: list[dict[str, Any]] = []
+    order = [index for index in indices if 0 <= index < len(records)]
+    done = 0
+    first_error: Optional[BaseException] = None
+    for start in range(0, len(order), chunk_size):
+        chunk = order[start:start + chunk_size]
+        try:
+            reply = chat(PROJECT_SYSTEM_PROMPT, _build_project_user(records, chunk, allowed))
+            items = _parse_reply(reply)
+            by_index = {item["i"]: item for item in items}
+        except Exception as exc:
+            if first_error is None:
+                first_error = exc
+            report.failed += len(chunk)
+            done += len(chunk)
+            if on_progress is not None:
+                on_progress(done)
+            continue
+        for index in chunk:
+            item = by_index.get(index)
+            record = records[index]
+            if item is None:
+                report.failed += 1
+                continue
+            raw = item.get("projects")
+            proposed: list[str] = []
+            if isinstance(raw, list):
+                for value in raw:
+                    text = str(value).strip()
+                    if text in allowed_set and text not in proposed:
+                        proposed.append(text)
+            existing = [
+                str(path).strip() for path in (record.projects or []) if str(path).strip()
+            ]
+            added = [path for path in proposed if path not in existing]
+            if added:
+                pending.append(
+                    {
+                        "uuid": record.uuid,
+                        "title": record.title,
+                        "projects": added,
+                        "current": existing,
+                    }
+                )
+                report.updated += 1
+            else:
+                report.skipped += 1
+        done += len(chunk)
+        if on_progress is not None:
+            on_progress(done)
+    if report.updated == 0 and report.failed > 0 and first_error is not None:
+        raise first_error
+    return report, pending
+
+
 # ---------------------------------------------------------------- 内部
 
 
@@ -468,6 +554,26 @@ def _build_user(records: Sequence[Record], chunk: Sequence[int]) -> str:
                 lines.append(f"  {label}: {text}")
         blocks.append("\n".join(lines))
     return "\n".join(blocks)
+
+
+def _build_project_user(
+    records: Sequence[Record], chunk: Sequence[int], candidates: Sequence[str]
+) -> str:
+    lines = ["候选项目（只能逐字选择下列路径）："]
+    lines.extend(f"- {path}" for path in candidates)
+    lines.append("")
+    for index in chunk:
+        record = records[index]
+        lines.append(f"i={index}:")
+        for label, value in (
+            ("title", record.title),
+            ("keywords", getattr(record, "keywords", "")),
+            ("notes", record.notes),
+        ):
+            text = str(value).strip() if value is not None else ""
+            if text:
+                lines.append(f"  {label}: {text}")
+    return "\n".join(lines)
 
 
 def _clean_text(value: Any) -> Optional[str]:

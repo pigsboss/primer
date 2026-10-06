@@ -30,6 +30,8 @@
     POST   /api/projects/move     移动项目（{path, target}；记录里的路径同步改写，含子孙）
     POST   /api/projects/rename   重命名项目（{path, name}；只改最后一段，记录同步替换）
     POST   /api/projects/delete   删除项目及全部子项目（{path}；从记录与注册表移除）
+    POST   /api/projects/infer    按备注（LLM）推断记录从属项目（{uuids, candidates}；后台；只预演，进度轮询 …/infer/status）
+    POST   /api/projects/infer/status {token} 推断进度；done 时附 proposals＋stats
     PUT    /api/records/<uuid>    更新记录（整条替换）
     DELETE /api/records/<uuid>    删除记录
     POST   /api/scan              校验全部 files[].path 的存在性（不改库文件）
@@ -38,6 +40,7 @@
     POST   /api/files/scan        {path} 递归扫描文件夹，登记支持格式（pdf／图片）的文件记录，随后自动解析
     POST   /api/files/add         {paths} 登记指定文件（去重），随后自动解析
     POST   /api/files/parse       {uuids} 把文件记录重新排入解析队列
+    POST   /api/files/parse-unfinished 把未完成解析的文件（失败／已下载／待解析）批量排入解析队列
     POST   /api/files/open        {uuid, which: "source"|"markdown"} 用系统程序打开
     POST   /api/files/delete      {uuid} 删除文件记录（磁盘上的文件与产物不动）
     POST   /api/links/attach      {record_uuid, file_uuids, nature?} 把文件挂到文献记录（改挂／改性质）
@@ -174,6 +177,7 @@ class LibraryService:
         self.enrich_job: dict[str, Any] = {}
         self.link_job: dict[str, Any] = {}
         self.fetch_job: dict[str, Any] = {}
+        self.project_job: dict[str, Any] = {}
         self.declared: list[str] = []
         self._chat_sender = chat_sender
         self._web_lookup = web_lookup
@@ -984,6 +988,114 @@ class LibraryService:
         if auto_parse and counts["downloaded"]:
             self._ensure_parse_worker()
 
+    def start_project_infer(self, uuids: Any, candidates: Any) -> dict[str, Any]:
+        """按备注（LLM）推断记录从属项目：后台线程；只预演，不改库。"""
+        if (
+            not isinstance(uuids, list)
+            or not uuids
+            or not all(isinstance(item, str) for item in uuids)
+        ):
+            raise LibraryError("uuids must be a non-empty list of strings")
+        if (
+            not isinstance(candidates, list)
+            or not candidates
+            or not all(isinstance(item, str) and item.strip() for item in candidates)
+        ):
+            raise LibraryError("candidates must be a non-empty list of project paths")
+        normalized: list[str] = []
+        for item in candidates:
+            path = normalize_project_path(item)
+            if path and path not in normalized:
+                normalized.append(path)
+        if not normalized:
+            raise LibraryError("candidates must contain at least one valid project path")
+        sender = self._chat_sender or self._build_sender()
+        with self._lock:
+            library = self._require()
+            job = self.project_job
+            if job.get("status") == "running":
+                raise LibraryError("a project infer job is already running")
+            wanted = set(uuids)
+            records = [record for record in library.records if record.uuid in wanted]
+            if not records:
+                raise LibraryError("no records for the given uuids")
+            token = str(_uuid.uuid4())
+            self.project_job = {
+                "token": token,
+                "status": "running",
+                "done": 0,
+                "total": len(records),
+                "candidates": normalized,
+                "result": None,
+                "error": "",
+            }
+            thread = threading.Thread(
+                target=self._run_project_infer,
+                args=(token, records, normalized, sender),
+                daemon=True,
+            )
+        thread.start()
+        return {"started": True, "token": token, "total": len(records)}
+
+    def project_infer_status(self, token: Any) -> dict[str, Any]:
+        """推断进度；``done`` 时附 ``result``（proposals ＋ stats）。"""
+        if not isinstance(token, str) or not token:
+            raise LibraryError("project infer token is required")
+        with self._lock:
+            job = self.project_job
+            if not job or job.get("token") != token:
+                raise LibraryError(f"no project infer job for token: {token}")
+            payload = {
+                "status": job["status"],
+                "done": job["done"],
+                "total": job["total"],
+                "candidates": list(job["candidates"]),
+            }
+            if job["status"] == "failed":
+                payload["error"] = job["error"]
+            if job.get("result") is not None:
+                payload["result"] = job["result"]
+            return payload
+
+    def _run_project_infer(
+        self,
+        token: str,
+        records: list[Record],
+        candidates: list[str],
+        sender: Callable[[str, str], str],
+    ) -> None:
+        """推断线程：逐块调用 LLM（异常收成 job 的 failed；不改库）。"""
+        from ..enrich import preview_project_infer
+
+        job = self.project_job
+        if job.get("token") != token:
+            return
+
+        def progress(done: int) -> None:
+            with self._lock:
+                job["done"] = done
+
+        try:
+            report, pending = preview_project_infer(
+                records, list(range(len(records))), candidates, sender, on_progress=progress
+            )
+        except Exception as exc:
+            with self._lock:
+                job["status"] = "failed"
+                job["error"] = str(exc)[:300] or type(exc).__name__
+            return
+        with self._lock:
+            job["result"] = {
+                "proposals": pending,
+                "stats": {
+                    "updated": report.updated,
+                    "skipped": report.skipped,
+                    "failed": report.failed,
+                },
+            }
+            job["done"] = job["total"]
+            job["status"] = "done"
+
     def bulk_update_records(self, uuids: Any, fields: Any) -> dict[str, Any]:
         """把 ``fields`` 合并进选中记录（只改给定字段）；返回更新条数。"""
         from ..library import _RECORD_TEXT_FIELDS, now_iso
@@ -1587,6 +1699,35 @@ class LibraryService:
                 self._persist(library, invalidate_scan=False)
         self._ensure_parse_worker()
         return {"queued": queued}
+
+    def parse_unfinished(self) -> dict[str, Any]:
+        """把未完成解析的文件（失败／已下载）批量排入解析队列。
+
+        待解析（pending）本就在队列里、解析中（parsing）正在进行，都不重复入队；
+        计数一并回报，供界面提示。
+        """
+        with self._lock:
+            library = self._require()
+            counts = {"pending": 0, "parsing": 0, "failed": 0, "downloaded": 0}
+            for record in library.file_records:
+                counts[record.status] = counts.get(record.status, 0) + 1
+            targets = [
+                record
+                for record in library.file_records
+                if record.status in ("failed", "downloaded")
+            ]
+            for record in targets:
+                record.status = "pending"
+                record.error = ""
+                record.updated_at = now_iso()
+            if targets:
+                self._persist(library, invalidate_scan=False)
+        self._ensure_parse_worker()
+        return {
+            "queued": len(targets),
+            "pending": counts["pending"],
+            "parsing": counts["parsing"],
+        }
 
     def open_file_record(self, uuid: Any, which: Any = "source") -> dict[str, Any]:
         """用系统程序打开源文件或解析产物（markdown）。"""
@@ -2661,6 +2802,15 @@ def make_handler(service: LibraryService):
                     )
                 if path == "/api/projects/delete":
                     return self._send_json(200, service.delete_project(payload.get("path")))
+                if path == "/api/projects/infer":
+                    return self._send_json(
+                        200,
+                        service.start_project_infer(
+                            payload.get("uuids"), payload.get("candidates")
+                        ),
+                    )
+                if path == "/api/projects/infer/status":
+                    return self._send_json(200, service.project_infer_status(payload.get("token")))
                 if path == "/api/scan":
                     return self._send_json(200, {"scan": service.scan_files()})
                 if path == "/api/open":
@@ -2675,6 +2825,8 @@ def make_handler(service: LibraryService):
                     return self._send_json(200, service.add_files(payload.get("paths")))
                 if path == "/api/files/parse":
                     return self._send_json(200, service.parse_files(payload.get("uuids")))
+                if path == "/api/files/parse-unfinished":
+                    return self._send_json(200, service.parse_unfinished())
                 if path == "/api/files/open":
                     return self._send_json(
                         200,

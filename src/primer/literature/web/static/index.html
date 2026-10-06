@@ -40,6 +40,7 @@
       <div id="project-menu" class="dropdown hidden">
         <div class="dropdown-item" data-action="create">新建…</div>
         <div class="dropdown-item" data-action="attach-records">加入选中记录</div>
+        <div class="dropdown-item" data-action="infer">按备注推断项目…</div>
         <div class="dropdown-item" data-action="move">移动…</div>
         <div class="dropdown-item" data-action="rename">重命名…</div>
         <div class="dropdown-item" data-action="delete">删除…</div>
@@ -59,6 +60,7 @@
     <div class="spacer"></div>
     <button id="btn-new" disabled>＋ 新建记录</button>
     <button id="btn-scan" disabled>重扫</button>
+    <button id="btn-parse-unfinished" disabled>解析未完成文件</button>
   </header>
 
   <main id="layout">
@@ -318,6 +320,18 @@
       <div class="dialog-buttons">
         <button id="ft-cancel">关闭</button>
         <button id="ft-primary" class="primary">开始解析</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="pinfer-dialog" class="modal hidden">
+    <div class="dialog wide">
+      <h2>按备注推断项目</h2>
+      <div id="pi-body"></div>
+      <p id="pi-error" class="error"></p>
+      <div class="dialog-buttons">
+        <button id="pi-cancel">关闭</button>
+        <button id="pi-primary" class="primary">开始推断</button>
       </div>
     </div>
   </div>
