@@ -2080,3 +2080,59 @@ def test_fetch_scan_online_toggle(tmp_path):
         assert plan["url"] == "https://arxiv.org/pdf/1234.5678"
     finally:
         server.close()
+
+
+def test_fetch_download_retry_failure_reports_item(tmp_path):
+    import time
+
+    path = tmp_path / "primer.literature.json"
+    Library.create(path)
+    service = S.LibraryService.initial(str(path))
+    service._fetch_check_pdfinfo = False
+    service._web_lookup = [lambda title: []]
+
+    def broken(request, timeout=None):
+        raise OSError("network down")
+
+    service._fetch_opener = broken
+    server = _Server(service)
+    try:
+        _, created = server.request("POST", "/api/records", {"title": "Retry failure case"})
+        record_uuid = created["record"]["uuid"]
+        library = service.library
+        library.find(record_uuid).download_url = "https://example.org/x.pdf"
+        service._persist(library, invalidate_scan=False)
+
+        target = tmp_path / "refs"
+        status, started = server.request(
+            "POST", "/api/fetch/scan", {"scope": "missing", "target_dir": str(target), "online": False}
+        )
+        assert status == 200
+        token = started["token"]
+        payload = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            _, payload = server.request("POST", "/api/fetch/status", {"token": token})
+            if payload["status"] != "running":
+                break
+            time.sleep(0.05)
+        assert payload["status"] == "done" and payload["result"]["stats"]["direct"] == 1
+
+        status, started = server.request(
+            "POST", "/api/fetch/download", {"token": token, "uuids": [record_uuid]}
+        )
+        assert status == 200
+        payload = None
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            _, payload = server.request("POST", "/api/fetch/status", {"token": token})
+            if payload["status"] != "running":
+                break
+            time.sleep(0.05)
+        assert payload["status"] == "done" and payload["phase"] == "download"
+        assert payload["download"]["stats"]["failed"] == 1
+        item = payload["download"]["items"][0]
+        assert item["status"] == "failed" and "network down" in item["error"]
+        assert not list(target.glob("*.pdf"))
+    finally:
+        server.close()
