@@ -31,7 +31,6 @@ primer-sceneloop = "primer.scene.loop:main"
 primer-imgrefgen = "primer.imgcmp.refgen:main"
 primer-imgtile = "primer.imgcmp.tiler:main"
 primer-imgfeat = "primer.imgcmp.feat:main"
-primer-imgpose = "primer.imgcmp.pose:main"
 primer-imgtriage = "primer.imgcmp.triage:main"
 primer-review = "primer.review.server:main"
 

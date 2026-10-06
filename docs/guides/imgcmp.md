@@ -1,8 +1,8 @@
 # imgcmp 工具链
 
-参考图／渲染图对照工具链。同源链路：**T1 切图 → T2a 组件特征表 → T2b 姿态反求 →
-H1 差异分诊与交付门禁**；本文写 T1、参考生成器（refgen）、T2a、T2b 四节，
-H1 差异分诊与交付门禁另见 [imgcmp_triage.md](imgcmp_triage.md)。
+参考图／渲染图对照工具链。同源链路：**T1 切图 → T2a 组件特征表 → H1 差异分诊与交付门禁**；
+本文写 T1、参考生成器（refgen）、T2a 三节，H1 差异分诊与交付门禁另见
+[imgcmp_triage.md](imgcmp_triage.md)。
 
 语言纪律按 [CODING_STANDARDS.md](CODING_STANDARDS.md) v1.1：stdout 只出中文人读报告；
 stderr／异常／选项名／JSON 键一律英文。
@@ -19,7 +19,7 @@ python3 -m primer.imgcmp.<工具> …
   **没有** `primer` 的 `dist-info`，也**没有**任何 `primer-*` 可执行脚本。若你的环境未设，
   在命令前加 `PYTHONPATH=src` 即可（在仓库根下运行）。
 - `pyproject.toml` 的 `[project.scripts]` 里声明的 `primer-imgtile`／`primer-imgrefgen`／
-  `primer-imgfeat`／`primer-imgpose`／`primer-imgtriage` 只是**安装之后才会存在**的短名，
+  `primer-imgfeat`／`primer-imgtriage` 只是**安装之后才会存在**的短名，
   **本工程不使用**。文档里若出现这些短名（章节标题、JSON 的 `tool` 字段值等），
   都等价于下表的模块调用；**示例命令一律按 `python3 -m` 书写**。
 
@@ -28,7 +28,6 @@ python3 -m primer.imgcmp.<工具> …
 | `primer-imgtile` | `python3 -m primer.imgcmp.tiler` |
 | `primer-imgrefgen` | `python3 -m primer.imgcmp.refgen` |
 | `primer-imgfeat` | `python3 -m primer.imgcmp.feat` |
-| `primer-imgpose` | `python3 -m primer.imgcmp.pose` |
 | `primer-imgtriage` | `python3 -m primer.imgcmp.triage` |
 
 ---
@@ -146,8 +145,8 @@ python3 -m primer.imgcmp.tiler <image> [--roi X,Y,W,H] [--grids N [N ...]] [--ov
 ### 用途
 
 把 3D 素材变成"**带真值的合成基准**"：一个部件给一个唯一纯色的 ID 图（逐像素部件标签）、
-剪影、白底 CAD 观感图、黑底渲染图，外加一份 `truth.json`。它给 T2a（组件特征表）、
-T2b（姿态反求）与 H1（差异分诊）提供**可评分的数据集**——有真值，工具的输出才能被客观
+剪影、白底 CAD 观感图、黑底渲染图，外加一份 `truth.json`。它给 T2a（组件特征表）与
+H1（差异分诊）提供**可评分的数据集**——有真值，工具的输出才能被客观
 判对错，而不是互相比对自证。
 
 它是**离 Blender 的编排器**：本体在普通 python 下跑，负责参数解析、构型声明、真值提取
@@ -194,7 +193,7 @@ Blender 可执行文件按 `$PRIMER_BLENDER` → PATH 上的 `blender` → macOS
   views/az{A}_el{E}_roll{R}/
     id.png            每件一个唯一纯色（关抗锯齿、关阴影、无泛光）→ 逐像素部件标签
     id_legend.json    rgb -> 部件名/序号（英文键）
-    silhouette.png    白对象/黑底、关抗锯齿的掩膜（T2b 剪影匹配用）
+    silhouette.png    白对象/黑底、关抗锯齿的掩膜
     white_cad.png     白底 CAD 观感（背景纯白、环境/平光着色、无阴影）
     black_render.png  黑底渲染（背景纯黑、单一主光＋fill，**不加星空**）
     truth.json        该机位的真值
@@ -549,162 +548,3 @@ refgen 真值里有两套件数，**不是一回事**：
   目前不做（会把已判对的合页/支座类件一起打回去）。
 - **开口判据里的 0.005 / 35% / 3.5 / 0.02 / 0.30 / 0.6 / 0.5 都是经验阈值**，换任务族需复核。
 
----
-
-## T2b `primer-imgpose` —— 姿态反求（剪影模板匹配）
-
-### 用途
-
-给一张基准图（论文图/CAD 截图）和一台"能把我的场景渲成剪影"的渲染器，反求基准图对应的
-相机姿态 **(方位角, 俯仰角, 滚转角)**：最大化剪影 IoU，输出三轴角＋残差，以及一份
-**可一键重渲同视角**的相机参数文件。它回答的是"这张图到底是从哪拍的"——首轮"盘下仰拍、
-画面倒过来"这类**纯机位错误**（几何没错、看着就是不对）就靠它客观指出来。
-
-### CLI
-
-```
-python3 -m primer.imgcmp.pose solve <baseline.png> --renderer-cmd "<模板>" --out DIR
-                [--coarse 5] [--fine 1] [--top-k 5] [--res 480]
-                [--az-range 0,355] [--el-range=-60,60] [--roll-step DEG]
-                [--min-iou 0.90] [--renderer-timeout S] [--drop-renders] [--selftest]
-```
-
-| 选项 | 缺省 | 说明 |
-|---|---|---|
-| `baseline` | 必填 | 基准图（论文图裁切或渲染图） |
-| `--renderer-cmd` | 必填 | 渲染器命令模板，见下 |
-| `--out DIR` | 必填 | 产物目录 |
-| `--coarse` / `--fine` | `5` / `1` | 粗网格与精修步长（度） |
-| `--top-k` | `5` | 带进精修的候选数 |
-| `--res PX` | `480` | 渲染分辨率（正方形） |
-| `--az-range` / `--el-range` | `0,355` / `-60,60` | 搜索范围；**负值要写成 `--el-range=-60,60`**（argparse 会把 `-60,60` 当选项） |
-| `--roll-step DEG` | `= --coarse` | 粗筛阶段的 roll 扫描步长 |
-| `--min-iou F` | `0.90` | **启发式有解性闸门**（非判据）：最优剪影 IoU 低于它即报 `solvable=false`。取值见下 |
-| `--renderer-timeout S` | `900` | 单次渲染器调用的墙钟上限 |
-| `--drop-renders` | 关 | 求解后删掉中间剪影 |
-
-**`--min-iou` 为什么是 0.90（第 5 轮由 0.80 上调）**：T2b 实测三个口径——**同源可解例**
-0.968（真值机位反求对得上）、**收窄搜索得到的伪解** 0.849（把 `--el-range` 收窄到真值
-附近后，求解器被挤到一个错误机位却仍有 0.849）、论文 **CAD 基准 Fig.3(b)** 0.737
-（示意画法，本不足以定姿态）。0.80 会把 0.849 那个**错误解判成可解**，0.90 才把三者
-分开（0.849 < 0.90 ≤ 0.968）。它是**启发式闸门、不是判据**，所以 `solvable=true` 只说明
-"这张图足以定姿态"，不代表最优解唯一——**第二道闸是 `ambiguous` 分档**
-（strong：top-1/top-2 剪影 IoU 差 < 0.004；weak：< 0.02）。两档都要看，不能只看 `solvable`。
-
-退出码：成功 `0`；用法/输入错误（缺 `--out`、模板不含占位符、`--coarse`/`--top-k` 非法、
-基准图坏）`2`；渲染器非零退出或超时 `2`；未预期异常 `3`。
-
-### 渲染器接线（工具内零任务数值）
-
-`--renderer-cmd` 里的占位符，两种模式二选一：
-
-| 占位符 | 含义 |
-|---|---|
-| `{jobs}` | **批任务 JSON 路径**（推荐）：一次调用渲完一批，渲染器自己写 `<outdir>/render_manifest.json` |
-| `{outdir}` / `{res}` | 批任务输出目录 / `W,H` |
-| `{az}` `{el}` `{roll}` `{out}` | 单张模式（模板不含 `{jobs}` 时，工具逐张调用） |
-
-两个现成适配器（`src/primer/imgcmp/adapters/`）：
-
-- `observatory_silhouette.py`——**任务场景**接法：`--task-root DIR --target COL0`，
-  跑任务侧 `array2034.build_scene()`，只留目标器体（束体/星空/其余器体全部
-  `hide_render`），Workbench `SINGLE(1,1,1)`＋黑底＋关 AA 渲正交剪影；
-- `model_silhouette.py`——**通用模型**接法：任意 glb/gltf/stl，**相机口径与
-  `primer-imgrefgen` 同源**（逐网格 `bound_box` 角点取景＋同一套 az/el/roll→视向），
-  所以拿 refgen 渲的 `silhouette.png` 当伪基准时，真值机位与反求机位在同一约定下。
-
-### 为什么不 72×37×72 全网格重渲
-
-滚转在**正交/长焦投影**下等价于对图像做 2D 旋转（相机绕视轴滚 θ ⇔ 图像内容转 −θ），
-所以：**(az, el) 粗网格一个渲染会话里一次渲完（roll 固定 0），roll 全程用 numpy 转剪影**，
-只有 `--top-k` 个候选才重渲精修网格。这把手指数从 O(az×el×roll) 压到 O(az×el + 精修)。
-
-**近似误差**：正交投影下 2D 旋转是**数学等价**的，残差只来自重采样与细结构在低分辨率下的
-连通性变化——实测见本节的验收记录（本任务尺度 480 px 下，同一机位 roll=30 与
-"roll=0 渲图做 −30° 2D 旋转"的归一化剪影 IoU ≈0.9；240 px 小图上降到 ≈0.66）。
-
-### 剪影口径
-
-- 基准图与**每一张渲染图**都过同一步 `outline_of()`：取最大 8 邻接连通域 + 填内部空洞。
-  基准多是"填色 CAD 轮廓（可能带内线）"，渲染可能是桁架那种带洞的双色剪影；不统一口径，
-  IoU 比的就不是轮廓而是"谁画了内线"。副产品：基准里的图注 "(b)" 这类独立小块被丢掉。
-- 归一化：裁到 bbox → 最长边缩放到 `(1−2×0.06)·256` → 居中。**bbox 归一化不是旋转不变的**
-  （同一形状转 30° 后外接框会变大），所以每次 2D 旋转后**重新归一化**再比 IoU，
-  两边才落在同一个"最长边定值、质心居中"的标度上。
-- 残差：归一化画布上的剪影 IoU（`residual.iou`）＋对称差（归一化像素数与换算到渲染尺度的
-  像素数）。
-
-### 产物
-
-```
-<out>/
-  solve.json      三轴角、残差、top_k[]、网格与耗时、基准/渲染器记账、method（口径自述）
-  camera.json     相机参数＋**已代入角度的可执行命令**（一键重渲）
-  overlay.png     基准红／最优绿，重合处黄
-  renders/        粗网格剪影（--drop-renders 可删）
-  fine/           精修剪影
-```
-
-### 已知边界
-
-- **剪影歧义**：盘状/近轴对称的物体（屏盘、天线）从"镜像"或"掉头 180°"看剪影几乎一样，
-  IoU 地形会同时出现多个等高谷——`top_k` 里若出现两个 IoU 极接近的候选，说明该图**不足以
-  定姿态**，要另加约束（换机位、加区域 ROI、或用 T2a 的组件特征）。
-- **滚转只在粗筛里用 numpy 转**：精修阶段仍是"渲染 (az,el) + numpy 扫 roll"，没有重渲 roll；
-  若物体有**强透视**（近距大视场），2D 旋转近似会退化，此时应改用正交或长焦渲染器。
-- **基准图的剪影提取依赖阈值**：白底论文图里比阈值更亮的高光面会被漏掉（同 T2a 的边界）；
-  基准带文字标注时靠"最大连通域"丢掉，若标注与主体相连则会污染剪影。
-- **渲染器必须无状态可重复**：工具假设"同一 (az,el,roll) 渲出同一张图"；渲染器带随机
-  种子/自适应采样时，IoU 会有噪声底。
-- **`--el-range` 带负号要写成 `=` 形式**（argparse 的已知行为），否则会把 `-60,60` 当选项。
-
-#### T2b 增补：渲染器一致性缺陷的根因与修法（2026-10-02 定位）
-
-**症状**：同一模型、同一机位，`primer-imgrefgen` 的 `silhouette.png` 与
-`model_silhouette.py` 适配器渲出来的图**不一样**——`dsn70m` 的盘壳在 refgen 里是**实心**
-（同机位 `dish` 一个对象 21596 px），在适配器里几乎不见（**6 px**），整体归一化剪影 IoU
-只有 0.907/0.853。这属于**自己工具链内部不一致**，会污染合成真值的验证。
-
-**根因**：`glTF` 导入会建一层 `EMPTY` 父级。**在子对象仍挂在父级下时**直接赋
-`obj.matrix_world = M @ obj.matrix_world`，Blender 需要按 `parent.matrix_world` 反解出
-`matrix_basis`；这个往返在带旋转/缩放的父链上**不闭合**，于是被变换的对象位置/朝向算歪——
-`dish` 正好是这种子对象，壳面被算到画面外，只剩 6 px。
-`primer-imgrefgen` 的 `import_file()` **先 `flatten()`（脱离父级、保留世界变换）再删非网格
-对象**，所以从没踩到；适配器此前漏了这一步。
-
-**修法**（`adapters/model_silhouette.py`，一行次序问题）：导入后**先拆父级 + 删非网格对象，
-再做 bbox 归一化**：
-
-```python
-for ob in list(bpy.data.objects):          # 先 flatten
-    if ob.parent is not None:
-        world = ob.matrix_world.copy(); ob.parent = None; ob.matrix_world = world
-for ob in [o for o in bpy.data.objects if o.type != "MESH"]:   # 再删非网格
-    bpy.data.objects.remove(ob, do_unlink=True)
-```
-
-**修后实测**（同一模型同机位，两份渲染逐像素比）：
-
-| 机位 | 适配器 px / refgen px | 原始 IoU | 归一化 IoU |
-|---|---|---|---|
-| az35_el20_roll25 | 52932 / 52932 | **1.0000** | **1.0000** |
-| az200_el30_roll140 | 72496 / 72496 | **1.0000** | **1.0000** |
-
-修前是 0.907 / 0.853。**同一渲染器、同一机位现在逐像素相同**（远超 ≥0.98 的要求）。
-
-**教训**：接外部渲染器时，"把世界矩阵乘上去"这种看似无害的操作，在**父链未拆**的导入结果上
-不是幂等的；凡是"归一化/变换整棵对象树"的适配器，**先 flatten 再动矩阵**。
-
-#### T2b 增补：姿态歧义告警与可调搜索范围
-
-- `solve.json` 新增两个字段：`ambiguous`（布尔）与 `ambiguity_note`（中文一句）。
-  **判据**：精修后 top-1 与 top-2 的剪影 IoU 差 **< `AMBIGUITY_IOU_GAP` = 0.02** 即判歧义。
-  阈值来源：正常收敛时 top-1/top-2 的差在 0.05 量级（合成例实测 0.06–0.30），而翻面歧义
-  实测差 0.000–0.004；取 0.02 落在两者之间，既不误报也不漏报。
-  `ambiguity_note` 会点出疑似歧义类型（"俯仰反号 el↔−el"／"方位掉头 az 差约 180°"），
-  并提示收窄范围或补一张不同机位的图。
-- 三个范围选项全部文档化、**调用方可控**：`--az-range A0,A1`（缺省 `0,355`）、
-  `--el-range E0,E1`（缺省 `-60,60`）、`--roll-range R0,R1`（缺省 `0,355`）。
-  收窄 `--el-range` 是**排除翻面支的正经手段**（基准视角的物理范围由调用方声明，不是工具
-  内嵌任务数值）；收窄 `--roll-range` 同理。负值要写成 `=` 形式：`--el-range=-10,10`。
-- `solve.json.grid` 里 `az_range`/`el_range`/`roll_range` 三项如实记录本次实际搜索范围。

@@ -48,6 +48,9 @@ blender --background --python verify.py        # 自动验收，输出 PASS/FAIL
 - **定稿条件**（依提出方 2026-10-02 决定）：① kimi work 布置的**两层工具**——T1 多尺度多部位切图器、
   T2a 组件特征表／T2b 姿态反求，以及 H1 差异分诊与交付门禁——**完成并通过总体 A-T\*/A-H\* 验收**；
   ② 用该工具对本包跑完**特征级 v3 复核**并处理结论；③ 复核后再做一次入库提交，届时方视为**定稿**。
+- **（2026-10-06 补记）T2b 注销**：提交方已裁定**不保留**姿态反求工具——`primer.imgcmp.pose`
+  （`primer-imgpose`）与剪影适配器（`adapters/model_silhouette.py`、`adapters/observatory_silhouette.py`）
+  及 `tests/test_imgcmp_pose.py` 已删除；定稿条件①中 **T2b 一项就此注销**（T1／T2a／H1 不受影响）。
 - **已登记未办项**：《验收反馈_09》§三.4 要求的"阶段三/四定图联动重出"**未执行**（`wing.py` 已变更）。
 - 冻结与哈希记账见工作区 `out/separation/script_hashes.json`（唯一例外：`wing.py` 限域解冻，
   `a140096fb563fe03` ← `fa6e95a3e1ed76ea`）。

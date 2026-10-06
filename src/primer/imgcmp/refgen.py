@@ -11,7 +11,7 @@
     views/az{A}_el{E}_roll{R}/
         id.png           每件一个唯一纯色 → 逐像素部件标签（关抗锯齿、关阴影、无泛光）
         id_legend.json   rgb -> 部件名/序号（英文键）
-        silhouette.png   白对象/黑底、关抗锯齿的掩膜（T2b 剪影匹配用）
+        silhouette.png   白对象/黑底、关抗锯齿的掩膜
         white_cad.png    白底 CAD 观感（背景纯白、环境/平光着色、无阴影）
         black_render.png 黑底渲染（背景纯黑、单一主光＋fill、不加星空）
         truth.json       该机位的真值（见下）
