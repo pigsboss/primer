@@ -33,6 +33,7 @@ primer-imgtile = "primer.imgcmp.tiler:main"
 primer-imgfeat = "primer.imgcmp.feat:main"
 primer-imgtriage = "primer.imgcmp.triage:main"
 primer-review = "primer.review.server:main"
+primer-figure = "primer.figure.__main__:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "primer.__version__" }
@@ -44,6 +45,7 @@ include = ["primer*"]
 [tool.setuptools.package-data]
 "primer.digest" = ["rules_examples/*.yml"]
 "primer.book" = ["templates/*.tmpl"]
+"primer.figure" = ["templates/*.md"]
 "primer.literature.web" = ["static/*"]
 "primer.review" = ["static/*"]
 
